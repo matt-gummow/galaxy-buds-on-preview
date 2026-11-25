@@ -131,20 +131,25 @@ replace_once(patcher,
     '            return false;\n'
     '        }\n')
 
+replace_once('GalaxyBudsClient.Platform.OSX/Unmanaged.cs',
+    '    internal static extern unsafe BT_CONN_RESULT bt_connect(BluetoothImpl* self, string mac, byte* uuid);\n',
+    '''    internal static extern unsafe BT_CONN_RESULT bt_connect(BluetoothImpl* self, string mac, byte* uuid);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void Bt_OnDiagnostic(IntPtr message);
+
+    [DllImport(DSO.Name, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern unsafe BT_CONN_RESULT bt_connect_diagnostic(
+        BluetoothImpl* self, string mac, byte* uuid, Bt_OnDiagnostic callback);
+
+''')
+
 mac_bluetooth = 'GalaxyBudsClient.Platform.OSX/BluetoothService.cs'
 replace_once(mac_bluetooth,
     '        private string _currentUuid = string.Empty;\n',
     '''        private string _currentUuid = string.Empty;
         private Action<string>? _currentDiagnostics;
         private Action<byte[]>? _currentDiagnosticRx;
-
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        private delegate void OnDiagnostic(IntPtr message);
-
-        [DllImport("libNativeInterop.dylib", CallingConvention = CallingConvention.Cdecl)]
-        private static extern unsafe BT_CONN_RESULT bt_connect_diagnostic(
-            BluetoothImpl* native, [MarshalAs(UnmanagedType.LPUTF8Str)] string mac,
-            byte* uuid, OnDiagnostic callback);
 ''')
 replace_once(mac_bluetooth,
     'await ConnectAsync(_currentMac, _currentUuid, CancellationToken.None);',
@@ -182,7 +187,7 @@ replace_once(mac_bluetooth,
     '                        result = Bluetooth.bt_connect(_nativePtr, macAddress, rawUuid);\n',
     '''                        result = diagnostics == null
                             ? Bluetooth.bt_connect(_nativePtr, macAddress, rawUuid)
-                            : bt_connect_diagnostic(_nativePtr, macAddress, rawUuid,
+                            : Bluetooth.bt_connect_diagnostic(_nativePtr, macAddress, rawUuid,
                                 message => diagnostics(NativeUtf8ToString(message)));
 ''')
 replace_once(mac_bluetooth,
@@ -270,18 +275,20 @@ replace_once(bluetooth,
                 : AlternativeModeEnabled ? Uuids.SmepSpp.ToString() : DeviceSpec.ServiceUuid.ToString();
 ''')
 replace_once(bluetooth,
-    '            await _backend.ConnectAsync(device.MacAddress,  uuid, _connectCancelSource.Token);\n',
-    '''            if (device.Model == Models.BudsOn &&
+    '            await _backend.ConnectAsync(device.MacAddress,  uuid, _connectCancelSource.Token);\n            return true;\n',
+    '''#if OSX
+            if (device.Model == Models.BudsOn &&
                 _backend is OSX.BluetoothService macBackend)
             {
                 BudsOnDiagnostics.Record("Buds On connection requested");
                 await macBackend.ConnectAsync(device.MacAddress, uuid, _connectCancelSource.Token,
                     BudsOnDiagnostics.Record, HandleBudsOnDiagnosticRx);
+                return true;
             }
-            else
-            {
-                await _backend.ConnectAsync(device.MacAddress, uuid, _connectCancelSource.Token);
-            }
+#endif
+
+            await _backend.ConnectAsync(device.MacAddress, uuid, _connectCancelSource.Token);
+            return true;
 ''')
 replace_once(bluetooth,
     '        catch (BluetoothException ex)\n        {\n            OnBluetoothError(ex);\n            return false;\n        }\n',
@@ -530,5 +537,26 @@ replace_once(native + 'src/Bluetooth.mm',
         sdpQueryDone = YES;
     }
 ''')
+
+replace_once(native + 'src/Bluetooth.mm',
+    '    BOOL _channelClosedSignalled;\n',
+    '    BOOL _channelClosedSignalled;\n    bool _diagnosticChannel;\n')
+replace_once(native + 'src/Bluetooth.mm',
+    '        mRFCOMMChannel = tempRFCOMMChannel;\n',
+    '        mRFCOMMChannel = tempRFCOMMChannel;\n        _diagnosticChannel = diagnostic != nullptr;\n')
+replace_once(native + 'src/Bluetooth.mm',
+    '        mRFCOMMChannel = nil;\n',
+    '        mRFCOMMChannel = nil;\n        _diagnosticChannel = false;\n')
+replace_once(native + 'src/Bluetooth.mm',
+    '        channel = mRFCOMMChannel;\n    }\n\n    if (channel != nil) {\n        if (![channel isOpen]) {',
+    '''        // Check the mode while taking the native channel snapshot. A previously queued
+        // write may have raced with a reconnect after the managed guard ran.
+        if (_diagnosticChannel)
+            return BT_SEND_SUCCESS;
+        channel = mRFCOMMChannel;
+    }
+
+    if (channel != nil) {
+        if (![channel isOpen]) {''')
 
 print('Done. Buds On connection diagnostics enabled. All Buds On protocol writes are blocked.')
