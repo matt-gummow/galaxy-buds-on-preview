@@ -338,7 +338,7 @@ replace_once(settings_page,
 settings_code = 'GalaxyBudsClient/Interface/Pages/SettingsPage.axaml.cs'
 replace_once(settings_code,
     'using Avalonia.Interactivity;\n',
-    'using Avalonia.Controls;\nusing Avalonia.Interactivity;\n')
+    'using Avalonia.Controls;\nusing Avalonia.Input.Platform;\nusing Avalonia.Interactivity;\n')
 replace_once(settings_code,
     '    public async void OnApplyMultipointClicked(object? sender, RoutedEventArgs e)\n',
     '''    public async void OnCopyBudsOnReportClicked(object? sender, RoutedEventArgs e)
