@@ -28,6 +28,11 @@ jobs:
           path: GalaxyBudsClient-source
           persist-credentials: false
 
+      - name: Select Xcode 27.2 required by .NET macOS workload
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '27.2'
+
       - name: Install .NET SDK 11 from upstream global.json
         uses: actions/setup-dotnet@v6
         with:
