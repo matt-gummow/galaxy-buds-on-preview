@@ -23,7 +23,7 @@ The preview also saves the report automatically as `~/Library/Application Suppor
 ## Current support
 
 - The app recognizes Buds On by Bluetooth name. The macOS connection attempts Bluetooth service discovery and tries the existing Galaxy Buds management UUID. The report distinguishes a refreshed service list from a potentially cached one.
-- The Home page shows the overall battery percentage when macOS reports it for the selected Buds On. Left, right, and case readings still require model-specific validation.
+- The Home page shows the earbuds' lower battery percentage and the case percentage from repeated Buds On status messages. Missing fields are omitted. Before those messages arrive, the app can show the overall percentage supplied by macOS. Separate left and right readings remain in the diagnostics while they are independently verified.
 - The preview blocks outgoing Samsung protocol messages, including settings, factory reset, firmware, and multipoint writes. It checks incoming frames in memory for valid Samsung SPP framing and CRC. The report records message IDs, lengths, counts, and clearly marked battery candidates without saving raw packets.
 - EQ and touch settings still require model-specific validation. The EQ controls can change the displayed preset while the preview blocks the device command.
 - Samsung supports Auto Switch on compatible Galaxy devices and on Windows through Galaxy Connect. The existing [GalaxyBudsClient multipoint patch](https://github.com/timschneeb/GalaxyBudsClient/pull/729) has no verified Buds On compatibility.
