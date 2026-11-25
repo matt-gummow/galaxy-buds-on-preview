@@ -12,17 +12,19 @@ This repository builds a **read-only, experimental Galaxy Buds On (SM-U600)** va
 
 No local Xcode installation or Apple App Store sign-in is needed. The cloud workflow checks out upstream commit `85dfc8bb39fc45d3c30ecf71ab2c663fb1d41729`, applies `add_buds_on.py`, compiles the macOS native Bluetooth library, and publishes a `.pkg` with .NET 11.
 
-## Scope of this preview
+## Run the read-only connection test
 
-- Tries to identify Galaxy Buds On by the advertised Bluetooth name.
-- Uses an *unverified* Galaxy Buds management service UUID. Bluetooth audio pairing alone does not establish that this service is present.
-- Blocks **all outgoing normal and alternative Samsung protocol messages** on this experimental model, including configuration, firmware operations, and multipoint writes.
-- Does not decode incoming frames as if they belonged to an older Galaxy Buds model.
-- Enables optional raw receive diagnostics only when the app starts with environment variable `GALAXYBUDS_ON_LOG_RAW=1`.
+1. Connect Galaxy Buds On through macOS Bluetooth and open the preview. In GalaxyBudsClient, select **Galaxy Buds On** and click **Connect** if the app offers it.
+2. Wait about 15 seconds. Open the app's **Settings** and select **Copy Buds On connection report**, even if the app reports a connection error.
+3. Paste the report in your test conversation. It contains SDP service-class UUIDs, RFCOMM channels, connection results, and incoming chunk sizes. It excludes Bluetooth addresses, device names, and packet contents. The report covers the current app launch.
 
-The raw receive logs may contain device identifiers or other sensitive metadata. Do not post unredacted logs publicly. Consider disabling optional application crash reporting and crowdsourcing before tests.
+## Current support
 
-**Next step:** Validate the actual Buds On Bluetooth service characteristics and traffic from a connected Mac. Once verified, model-specific functionality can be implemented incrementally. Do **not** send the existing Galaxy Buds2 Pro multipoint commands to Buds On without testing the protocol first.
+- The app recognizes Buds On by Bluetooth name. The macOS connection attempts Bluetooth service discovery and tries the existing Galaxy Buds management UUID. The report distinguishes a refreshed service list from a potentially cached one.
+- Battery, EQ, and touch settings require model-specific validation. The EQ controls can change the displayed preset while the preview blocks the device command.
+- The preview blocks outgoing Samsung protocol messages, including settings, factory reset, firmware, and multipoint writes. It counts incoming chunks without decoding them as another Buds model.
+- Samsung supports Auto Switch on compatible Galaxy devices and on Windows through Galaxy Connect. The existing [GalaxyBudsClient multipoint patch](https://github.com/timschneeb/GalaxyBudsClient/pull/729) has no verified Buds On compatibility.
+- For a follow-up trace, raw receive logging is available only when the app starts with `GALAXYBUDS_ON_LOG_RAW=1`. Raw logs can contain identifiers or other sensitive metadata. Keep them local unless they have been reviewed and redacted.
 
 ## Important limits
 
