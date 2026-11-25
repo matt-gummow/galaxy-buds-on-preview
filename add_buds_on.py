@@ -208,6 +208,8 @@ replace_once(mac_bluetooth,
 
 write_once('GalaxyBudsClient/Platform/BudsOnDiagnostics.cs', '''using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Threading;
 
 namespace GalaxyBudsClient.Platform;
 
@@ -216,6 +218,8 @@ internal static class BudsOnDiagnostics
     private static readonly object Sync = new();
     private static readonly Queue<string> Events = new();
     private static readonly List<int> FirstChunkLengths = new();
+    private static readonly Timer ReportTimer = new(_ => SaveReport());
+    private static bool _savePending;
     private static long _chunks;
     private static long _bytes;
 
@@ -226,6 +230,7 @@ internal static class BudsOnDiagnostics
             if (Events.Count == 100)
                 Events.Dequeue();
             Events.Enqueue(text);
+            ScheduleSave();
         }
     }
 
@@ -237,6 +242,40 @@ internal static class BudsOnDiagnostics
             _bytes += bytes;
             if (FirstChunkLengths.Count < 16)
                 FirstChunkLengths.Add(bytes);
+            ScheduleSave();
+        }
+    }
+
+    // Coalesce nearby native callbacks and keep an atomic copy outside the UI.
+    private static void ScheduleSave()
+    {
+        if (_savePending || !PlatformUtils.IsOSX)
+            return;
+
+        _savePending = true;
+        ReportTimer.Change(250, Timeout.Infinite);
+    }
+
+    private static void SaveReport()
+    {
+        lock (Sync)
+        {
+            _savePending = false;
+            var reportPath = PlatformUtils.CombineDataPath("buds-on-connection-report.txt");
+            var stagedPath = reportPath + ".tmp";
+            try
+            {
+                File.WriteAllText(stagedPath, CopyText(), System.Text.Encoding.UTF8);
+                File.Move(stagedPath, reportPath, overwrite: true);
+            }
+            catch (IOException)
+            {
+                // Copy from Settings is still available if the data directory cannot be written.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // A file permissions problem should never interrupt the Bluetooth connection.
+            }
         }
     }
 
@@ -328,11 +367,9 @@ replace_once(bluetooth,
 settings_page = 'GalaxyBudsClient/Interface/Pages/SettingsPage.axaml'
 replace_once(settings_page,
     '            <ui:FASettingsExpander Header="{ext:Translate {x:Static i18N:Keys.SettingsMultipointHeader}}"',
-    '''            <controls:SettingsSymbolItem Content="Copy Buds On connection report"
-                                         Description="Copy Bluetooth connection details without addresses or packet contents."
-                                         IsVisible="{x:Static platform:PlatformUtils.IsOSX}"
-                                         IsClickEnabled="True"
-                                         Click="OnCopyBudsOnReportClicked" />
+    '''            <Button Content="Copy Buds On connection report"
+                    IsVisible="{x:Static platform:PlatformUtils.IsOSX}"
+                    Click="OnCopyBudsOnReportClicked" />
 
             <ui:FASettingsExpander Header="{ext:Translate {x:Static i18N:Keys.SettingsMultipointHeader}}"''')
 settings_code = 'GalaxyBudsClient/Interface/Pages/SettingsPage.axaml.cs'
