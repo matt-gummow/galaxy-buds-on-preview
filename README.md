@@ -20,15 +20,13 @@ No local Xcode installation or Apple App Store sign-in is needed. The cloud work
 
 The preview also saves the report automatically as `~/Library/Application Support/GalaxyBudsClient/buds-on-connection-report.txt`. If Settings is unavailable, open that file after a connection attempt to read the same report.
 
-## Compare a Samsung call setting
+## Compare settings in one session
 
-Use the **Answer call or end call** toggle in the Buds On settings on your Galaxy phone. Keep Buds Manager open throughout the comparison.
+Keep Buds Manager open so the report can retain observations across reconnects. Start with the settings as they are and capture one Mac reading before editing anything in Galaxy Wearable.
 
-1. With the toggle in its original state, connect the earbuds to the Mac and wait for a new status message.
-2. Switch only that toggle on the phone and reconnect the earbuds to the Mac if the phone took the connection.
-3. Restore the original toggle value and reconnect to the Mac again if needed.
+Change one setting at a time on the Galaxy phone. After each change, reconnect the buds to the Mac if the phone took the connection and wait for a fresh status message. Start with **Answer call or end call**, then try **Decline call**, one left or right hold action, **Media controls**, and one EQ preset. Restore values individually and capture each restored state.
 
-The report records the initial candidate value for each Mac connection and any changes within it. Compare that sequence with the three observed Samsung states. It contains only the selected bit and connection and frame counters. A repeatable change corroborates a read-only setting. Changes to this setting are made on the phone for this test.
+Each report row contains the candidate EQ code, left and right hold-action codes, and expected touch and call flags. Unchanged rows are omitted within a connection. The first observation after a reconnect is always recorded. These are candidates until the changes in Galaxy Wearable match the observations. All changes in this test are made on the phone.
 
 ## Current support
 
