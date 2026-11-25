@@ -18,6 +18,8 @@ No local Xcode installation or Apple App Store sign-in is needed. The cloud work
 2. Wait about 15 seconds. Open the app's **Settings** and select **Copy Buds On connection report**, even if the app reports a connection error.
 3. Paste the report in your test conversation. It contains SDP service-class UUIDs, RFCOMM channels, connection results, and incoming chunk sizes. It excludes Bluetooth addresses, device names, and packet contents. The report covers the current app launch.
 
+The preview also saves the report automatically as `~/Library/Application Support/GalaxyBudsClient/buds-on-connection-report.txt`. If Settings is unavailable, open that file after a connection attempt to read the same report.
+
 ## Current support
 
 - The app recognizes Buds On by Bluetooth name. The macOS connection attempts Bluetooth service discovery and tries the existing Galaxy Buds management UUID. The report distinguishes a refreshed service list from a potentially cached one.
