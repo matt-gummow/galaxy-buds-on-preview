@@ -26,14 +26,15 @@ Keep Buds Manager open so the report can retain observations across reconnects. 
 
 Change one setting at a time on the Galaxy phone. After each change, reconnect the buds to the Mac if the phone took the connection and wait for a fresh status message. Start with **Answer call or end call**, then try **Decline call**, one left or right hold action, **Media controls**, and one EQ preset. Restore values individually and capture each restored state.
 
-Each report row contains the candidate EQ code, left and right hold-action codes, and expected touch and call flags. Unchanged rows are omitted within a connection. The first observation after a reconnect is always recorded. These are candidates until the changes in Galaxy Wearable match the observations. All changes in this test are made on the phone.
+Each report row contains the candidate EQ code, left and right hold-action codes, and expected touch and call flags. Unchanged rows are omitted within a connection. The first observation after a reconnect is always recorded. The call double-tap flag has passed an On → Off → On comparison. Other fields are candidates until individual changes in Galaxy Wearable match the observations. All changes in this test are made on the phone.
 
 ## Current support
 
 - The app recognizes Buds On by Bluetooth name. The macOS connection attempts Bluetooth service discovery and tries the existing Galaxy Buds management UUID. The report distinguishes a refreshed service list from a potentially cached one.
 - The Home page shows the earbuds' lower battery percentage and the case percentage from repeated Buds On status messages. Missing fields are omitted. Before those messages arrive, the app can show the overall percentage supplied by macOS. Separate left and right readings remain in the diagnostics while they are independently verified.
 - The preview blocks outgoing Samsung protocol messages, including settings, factory reset, firmware, and multipoint writes. It checks incoming frames in memory for valid Samsung SPP framing and CRC. The report records message IDs, lengths, counts, and clearly marked battery candidates without saving raw packets.
-- EQ and touch settings still require model-specific validation. The EQ controls can change the displayed preset while the preview blocks the device command.
+- The Touch controls page shows the current **Answer call or end call** setting as On or Off after a fresh Buds On status message. The row is read-only. Switching this setting on the phone and reconnecting to the Mac updates the display.
+- EQ and other touch settings still require more model-specific validation. The EQ controls can change the displayed preset while the preview blocks the device command.
 - Samsung supports Auto Switch on compatible Galaxy devices and on Windows through Galaxy Connect. The existing [GalaxyBudsClient multipoint patch](https://github.com/timschneeb/GalaxyBudsClient/pull/729) has no verified Buds On compatibility.
 
 ## Important limits
