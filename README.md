@@ -16,17 +16,17 @@ No local Xcode installation or Apple App Store sign-in is needed. The cloud work
 
 1. Connect Galaxy Buds On through macOS Bluetooth and open the preview. In GalaxyBudsClient, select **Galaxy Buds On** and click **Connect** if the app offers it.
 2. Wait about 15 seconds. Open the app's **Settings** and select **Copy Buds On connection report**, even if the app reports a connection error.
-3. Paste the report in your test conversation. It contains SDP service-class UUIDs, RFCOMM channels, connection results, and incoming chunk sizes. It excludes Bluetooth addresses, device names, and packet contents. The report covers the current app launch.
+3. Paste the report in your test conversation. It contains SDP service-class UUIDs, RFCOMM channels, connection results, incoming chunk sizes, and validated frame metadata. It excludes Bluetooth addresses, device names, and packet contents. The report covers the current app launch.
 
 The preview also saves the report automatically as `~/Library/Application Support/GalaxyBudsClient/buds-on-connection-report.txt`. If Settings is unavailable, open that file after a connection attempt to read the same report.
 
 ## Current support
 
 - The app recognizes Buds On by Bluetooth name. The macOS connection attempts Bluetooth service discovery and tries the existing Galaxy Buds management UUID. The report distinguishes a refreshed service list from a potentially cached one.
-- Battery, EQ, and touch settings require model-specific validation. The EQ controls can change the displayed preset while the preview blocks the device command.
-- The preview blocks outgoing Samsung protocol messages, including settings, factory reset, firmware, and multipoint writes. It counts incoming chunks without decoding them as another Buds model.
+- The Home page shows the overall battery percentage when macOS reports it for the selected Buds On. Left, right, and case readings still require model-specific validation.
+- The preview blocks outgoing Samsung protocol messages, including settings, factory reset, firmware, and multipoint writes. It checks incoming frames in memory for valid Samsung SPP framing and CRC. The report records message IDs, lengths, counts, and clearly marked battery candidates without saving raw packets.
+- EQ and touch settings still require model-specific validation. The EQ controls can change the displayed preset while the preview blocks the device command.
 - Samsung supports Auto Switch on compatible Galaxy devices and on Windows through Galaxy Connect. The existing [GalaxyBudsClient multipoint patch](https://github.com/timschneeb/GalaxyBudsClient/pull/729) has no verified Buds On compatibility.
-- For a follow-up trace, raw receive logging is available only when the app starts with `GALAXYBUDS_ON_LOG_RAW=1`. Raw logs can contain identifiers or other sensitive metadata. Keep them local unless they have been reviewed and redacted.
 
 ## Important limits
 
