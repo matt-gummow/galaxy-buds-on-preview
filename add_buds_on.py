@@ -253,12 +253,13 @@ internal sealed class BudsOnFrameProbe
     private const int EqualizerOffset = 9;
     private const int GestureFlagsOffset = 10;
     private const int CallDoubleTapBit = 4;
-    private const int HoldAssignmentsOffset = 11;
+    private const int CallHoldBit = 5;
+    private const int HoldStatusOffset = 11;
     // Bits 0–5 and 7 are candidates for the controls visible in Galaxy Wearable.
     private const byte ObservedGestureMask = 0xBF;
 
     private readonly record struct SettingsSnapshot(byte EqualizerCode, byte GestureFlags,
-        byte LeftHoldCode, byte RightHoldCode);
+        byte LeftHoldStatus, byte RightHoldStatus);
 
     private readonly byte[] _pending = new byte[MaximumBodyLength + 4];
     private readonly Dictionary<(byte Id, int PayloadLength), long> _signatures = new();
@@ -378,7 +379,7 @@ internal sealed class BudsOnFrameProbe
         if (!_observeSettings)
             return;
 
-        var assignments = payload[HoldAssignmentsOffset];
+        var assignments = payload[HoldStatusOffset];
         var settings = new SettingsSnapshot(payload[EqualizerOffset],
             (byte)(payload[GestureFlagsOffset] & ObservedGestureMask),
             (byte)(assignments >> 4), (byte)(assignments & 0x0F));
@@ -407,8 +408,10 @@ internal sealed class BudsOnFrameProbe
         return true;
     }
 
-    public bool? GetCallDoubleTap() =>
-        _lastSettings is { } settings ? IsFlagSet(settings.GestureFlags, CallDoubleTapBit) : null;
+    public (bool AnswerOrEnd, bool Decline)? GetCallControls() =>
+        _lastSettings is { } settings
+            ? (IsFlagSet(settings.GestureFlags, CallDoubleTapBit), IsFlagSet(settings.GestureFlags, CallHoldBit))
+            : null;
 
     public (int? Earbuds, int? Case) GetBattery()
     {
@@ -440,10 +443,10 @@ internal sealed class BudsOnFrameProbe
     private static string FormatSettings(SettingsSnapshot settings)
     {
         var flags = settings.GestureFlags;
-        return $"EQ code {settings.EqualizerCode} | Hold codes L={settings.LeftHoldCode} R={settings.RightHoldCode} | " +
+        return $"EQ code {settings.EqualizerCode} | Hold status nibbles L={settings.LeftHoldStatus} R={settings.RightHoldStatus} | " +
             $"Touch master candidate {FormatFlag(flags, 7)}, tap {FormatFlag(flags, 3)}, double {FormatFlag(flags, 2)}, " +
             $"triple {FormatFlag(flags, 1)}, hold {FormatFlag(flags, 0)} | " +
-            $"Call double {FormatFlag(flags, CallDoubleTapBit)}, call hold {FormatFlag(flags, 5)}";
+            $"Call double {FormatFlag(flags, CallDoubleTapBit)}, call hold {FormatFlag(flags, CallHoldBit)}";
     }
 
     private static bool IsFlagSet(byte flags, int bit) => (flags & (1 << bit)) != 0;
@@ -594,10 +597,10 @@ internal static class BudsOnDiagnostics
             return ReferenceEquals(_receiveDevice, device) ? FrameProbe.GetBattery() : (null, null);
     }
 
-    public static bool? GetCallDoubleTap(Device device)
+    public static (bool AnswerOrEnd, bool Decline)? GetCallControls(Device device)
     {
         lock (Sync)
-            return ReferenceEquals(_receiveDevice, device) ? FrameProbe.GetCallDoubleTap() : null;
+            return ReferenceEquals(_receiveDevice, device) ? FrameProbe.GetCallControls() : null;
     }
 
     public static void SetMacBattery(int? battery)
@@ -1118,11 +1121,15 @@ replace_once(touchpad_view,
     '''                <ext:RequiresConnectedDeviceBehavior />
             </Interaction.Behaviors>
 
-            <controls:SettingsGroup IsVisible="{Binding HasBudsOnCallDoubleTap}">
+            <controls:SettingsGroup IsVisible="{Binding HasBudsOnCallControls}">
                 <controls:SettingsSymbolItem
                     Content="{ext:Translate {x:Static i18N:Keys.TouchpadGestureDoubleForCall}}"
                     Description="{Binding BudsOnCallDoubleTapDescription, Mode=OneWay}"
                     Symbol="CallInbound" />
+                <controls:SettingsSymbolItem
+                    Content="{ext:Translate {x:Static i18N:Keys.TouchpadGestureHoldForCall}}"
+                    Description="{Binding BudsOnCallHoldDescription, Mode=OneWay}"
+                    Symbol="CallProhibited" />
             </controls:SettingsGroup>
 ''')
 
@@ -1130,11 +1137,13 @@ touchpad_vm = 'GalaxyBudsClient/Interface/ViewModels/Pages/TouchpadPageViewModel
 replace_once(touchpad_vm,
     '    public override Control CreateView() => new TouchpadPage { DataContext = this };\n',
     '''    private readonly DispatcherTimer _budsOnCallTimer = new() { Interval = TimeSpan.FromSeconds(1) };
-    private bool? _budsOnCallDoubleTap;
+    private (bool AnswerOrEnd, bool Decline)? _budsOnCallControls;
 
-    public bool HasBudsOnCallDoubleTap => _budsOnCallDoubleTap.HasValue;
+    public bool HasBudsOnCallControls => _budsOnCallControls.HasValue;
+    public string? BudsOnCallDoubleTapDescription => DescribeCallControl(_budsOnCallControls?.AnswerOrEnd);
+    public string? BudsOnCallHoldDescription => DescribeCallControl(_budsOnCallControls?.Decline);
 
-    public string? BudsOnCallDoubleTapDescription => _budsOnCallDoubleTap switch
+    private static string? DescribeCallControl(bool? enabled) => enabled switch
     {
         true => "On",
         false => "Off",
@@ -1146,32 +1155,33 @@ replace_once(touchpad_vm,
 replace_once(touchpad_vm,
     '    public TouchpadPageViewModel()\n    {\n',
     '    public TouchpadPageViewModel()\n    {\n'
-    '        _budsOnCallTimer.Tick += (_, _) => RefreshBudsOnCallDoubleTap();\n')
+    '        _budsOnCallTimer.Tick += (_, _) => RefreshBudsOnCallControls();\n')
 replace_once(touchpad_vm,
     '    public override void OnNavigatedTo() => UpdateEditStates();\n',
     '''    public override void OnNavigatedTo()
     {
         UpdateEditStates();
-        RefreshBudsOnCallDoubleTap();
+        RefreshBudsOnCallControls();
         if (PlatformUtils.IsOSX)
             _budsOnCallTimer.Start();
     }
 
     public override void OnNavigatedFrom() => _budsOnCallTimer.Stop();
 
-    private void RefreshBudsOnCallDoubleTap()
+    private void RefreshBudsOnCallControls()
     {
         var bluetooth = BluetoothImpl.Instance;
         var device = bluetooth.Device.Current;
-        var enabled = PlatformUtils.IsOSX && bluetooth.IsConnected && device?.Model == Models.BudsOn
-            ? BudsOnDiagnostics.GetCallDoubleTap(device)
+        var controls = PlatformUtils.IsOSX && bluetooth.IsConnected && device?.Model == Models.BudsOn
+            ? BudsOnDiagnostics.GetCallControls(device)
             : null;
-        if (_budsOnCallDoubleTap == enabled)
+        if (_budsOnCallControls == controls)
             return;
 
-        _budsOnCallDoubleTap = enabled;
-        this.RaisePropertyChanged(nameof(HasBudsOnCallDoubleTap));
+        _budsOnCallControls = controls;
+        this.RaisePropertyChanged(nameof(HasBudsOnCallControls));
         this.RaisePropertyChanged(nameof(BudsOnCallDoubleTapDescription));
+        this.RaisePropertyChanged(nameof(BudsOnCallHoldDescription));
     }
 ''')
 
