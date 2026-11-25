@@ -206,6 +206,270 @@ replace_once(mac_bluetooth,
                     fixed (byte* raw = data)
 ''')
 
+
+replace_once(bluetooth,
+    '    private void OnDisconnected(object? sender, string reason)\n    {\n',
+    '''    private void OnDisconnected(object? sender, string reason)
+    {
+        if (CurrentModel == Models.BudsOn)
+            BudsOnDiagnostics.ResetReceiveStream();
+''')
+
+write_once('GalaxyBudsClient/Platform/BudsOnFrameProbe.cs', '''using System;
+using System.Collections.Generic;
+using GalaxyBudsClient.Message;
+using GalaxyBudsClient.Utils;
+
+namespace GalaxyBudsClient.Platform;
+
+// Caller serializes all access. The stream buffer retains at most one maximum-size
+// modern SPP frame, and the report contains only metadata and battery candidates.
+internal sealed class BudsOnFrameProbe
+{
+    private const byte Start = (byte)MsgConstants.Som;
+    private const byte End = (byte)MsgConstants.Eom;
+    private const int MaximumBodyLength = 0x03ff;
+    private const int MaximumSignatures = 32;
+
+    private readonly byte[] _pending = new byte[MaximumBodyLength + 4];
+    private readonly Dictionary<(byte Id, int PayloadLength), long> _signatures = new();
+    private int _pendingLength;
+    private long _validFrames;
+    private long _otherSignatures;
+    private (long Count, byte Left, byte Right, byte Case) _basicStatus;
+    private (long Count, byte Left, byte Right, byte Case) _extendedStatus;
+
+    public void ResetStream()
+    {
+        _pendingLength = 0;
+        _basicStatus = default;
+        _extendedStatus = default;
+    }
+
+    public void Append(byte[] chunk)
+    {
+        foreach (var value in chunk)
+        {
+            if (_pendingLength == 0 && value != Start)
+                continue;
+
+            _pending[_pendingLength++] = value;
+            DrainFrames();
+        }
+    }
+
+    private void DrainFrames()
+    {
+        while (_pendingLength >= 3)
+        {
+            int header = _pending[1] | (_pending[2] << 8);
+            int size = header & MaximumBodyLength;
+            if (size < 3)
+            {
+                MoveToNextStart(1);
+                continue;
+            }
+
+            int frameLength = size + 4;
+            if (_pendingLength < frameLength)
+                return;
+
+            if (_pending[frameLength - 1] != End || !HasValidChecksum(size))
+            {
+                MoveToNextStart(1);
+                continue;
+            }
+
+            RecordFrame(_pending[3], size - 3, isFragment: (header & 0x2000) != 0);
+            MoveToNextStart(frameLength);
+        }
+    }
+
+    private bool HasValidChecksum(int size)
+    {
+        var crc = unchecked((ushort)Crc16.crc16_ccitt(new ArraySegment<byte>(_pending, 3, size - 2)));
+        int received = _pending[size + 1] | (_pending[size + 2] << 8);
+        return received == crc;
+    }
+
+    private void MoveToNextStart(int offset)
+    {
+        var next = Array.IndexOf(_pending, Start, offset, _pendingLength - offset);
+        if (next < 0)
+        {
+            _pendingLength = 0;
+            return;
+        }
+
+        _pendingLength -= next;
+        Array.Copy(_pending, next, _pending, 0, _pendingLength);
+    }
+
+    private void RecordFrame(byte id, int payloadLength, bool isFragment)
+    {
+        _validFrames++;
+        var signature = (id, payloadLength);
+        if (_signatures.TryGetValue(signature, out long count))
+            _signatures[signature] = count + 1;
+        else if (_signatures.Count < MaximumSignatures)
+            _signatures.Add(signature, 1);
+        else
+            _otherSignatures++;
+
+        if (isFragment)
+            return;
+
+        var payload = _pending.AsSpan(4, payloadLength);
+        if (id == (byte)MsgIds.STATUS_UPDATED && payloadLength >= 7)
+            RecordBatteryCandidate(payload, batteryOffset: 1, ref _basicStatus);
+        if (id == (byte)MsgIds.EXTENDED_STATUS_UPDATED && payloadLength >= 8)
+            RecordBatteryCandidate(payload, batteryOffset: 2, ref _extendedStatus);
+    }
+
+    private static void RecordBatteryCandidate(ReadOnlySpan<byte> payload, int batteryOffset,
+        ref (long Count, byte Left, byte Right, byte Case) status)
+    {
+        var left = payload[batteryOffset];
+        var right = payload[batteryOffset + 1];
+        var placement = payload[batteryOffset + 4];
+        var caseBattery = payload[batteryOffset + 5];
+        if (left > 101 || right > 101 || caseBattery > 101 ||
+            payload[batteryOffset + 2] > 1 || payload[batteryOffset + 3] > 1 ||
+            (placement >> 4) > 4 || (placement & 0x0f) > 4)
+            return;
+
+        status = (status.Count + 1, left, right, caseBattery);
+    }
+
+    public IEnumerable<string> SnapshotLines()
+    {
+        yield return $"CRC-valid modern Samsung SPP frames: {_validFrames}";
+        foreach (var entry in _signatures)
+            yield return $"SPP ID 0x{entry.Key.Id:X2}, payload length {entry.Key.PayloadLength}: {entry.Value} frame(s)";
+        if (_otherSignatures > 0)
+            yield return $"Frames with other ID/length signatures: {_otherSignatures}";
+        if (_basicStatus.Count >= 2)
+            yield return FormatBatteryCandidate((byte)MsgIds.STATUS_UPDATED, _basicStatus);
+        if (_extendedStatus.Count >= 2)
+            yield return FormatBatteryCandidate((byte)MsgIds.EXTENDED_STATUS_UPDATED, _extendedStatus);
+    }
+
+    private static string FormatBatteryCandidate(byte id, (long Count, byte Left, byte Right, byte Case) status) =>
+        $"Candidate battery fields from {status.Count} matching 0x{id:X2} status frames: " +
+        $"left {FormatPercent(status.Left)}, right {FormatPercent(status.Right)}, case {FormatPercent(status.Case)}";
+
+    private static string FormatPercent(byte value) => value == 101 ? "unavailable" : $"{value}%";
+}
+''')
+
+write_once('GalaxyBudsClient/Platform/BudsOnMacBattery.cs', '''using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace GalaxyBudsClient.Platform;
+
+internal static class BudsOnMacBattery
+{
+    public static async Task<int?> ReadAsync(string deviceName, CancellationToken cancellationToken)
+    {
+        if (!OperatingSystem.IsMacOS() || string.IsNullOrWhiteSpace(deviceName))
+            return null;
+
+        cancellationToken.ThrowIfCancellationRequested();
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(2));
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo("/usr/bin/pmset")
+            {
+                ArgumentList = { "-g", "accps" },
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            }
+        };
+
+        try
+        {
+            if (!process.Start())
+                return null;
+
+            var output = process.StandardOutput.ReadToEndAsync(deadline.Token);
+            var errors = process.StandardError.ReadToEndAsync(deadline.Token);
+            await Task.WhenAll(output, errors, process.WaitForExitAsync(deadline.Token)).ConfigureAwait(false);
+            return process.ExitCode == 0 ? Parse(await output.ConfigureAwait(false), deviceName) : null;
+        }
+        catch (OperationCanceledException)
+        {
+            try
+            {
+                process.Kill();
+            }
+            catch (InvalidOperationException)
+            {
+                // pmset exited while the cancellation was observed.
+            }
+            catch (Win32Exception)
+            {
+                // The accessory reading is unavailable if pmset cannot be stopped.
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            return null;
+        }
+        catch (Exception ex) when (ex is Win32Exception or IOException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    internal static int? Parse(string output, string deviceName)
+    {
+        var selectedName = NormalizeName(deviceName);
+        if (selectedName.Length == 0)
+            return null;
+
+        using var lines = new StringReader(output);
+        var matched = false;
+        int? percentage = null;
+        while (lines.ReadLine() is { } line)
+        {
+            line = line.Trim();
+            var idStart = line.LastIndexOf(" (id=", StringComparison.Ordinal);
+            if (!line.StartsWith('-') || idStart <= 1 ||
+                !string.Equals(NormalizeName(line[1..idStart]), selectedName, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var idEnd = line.IndexOf(')', idStart);
+            if (idEnd < 0)
+                continue;
+
+            var reading = line[(idEnd + 1)..].TrimStart();
+            if (reading.Contains("present: false", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (matched)
+                return null;
+            matched = true;
+
+            var percentEnd = reading.IndexOf("%;", StringComparison.Ordinal);
+            if (percentEnd > 0 && int.TryParse(reading.AsSpan(0, percentEnd), NumberStyles.None,
+                    CultureInfo.InvariantCulture, out var value) && value is >= 0 and <= 100)
+                percentage = value;
+        }
+
+        return percentage;
+    }
+
+    private static string NormalizeName(string name) =>
+        name.Normalize(NormalizationForm.FormC).Replace('\\u2019', '\\'').Replace('\\u2018', '\\'').Trim();
+}
+''')
+
 write_once('GalaxyBudsClient/Platform/BudsOnDiagnostics.cs', '''using System;
 using System.Collections.Generic;
 using System.IO;
@@ -218,10 +482,23 @@ internal static class BudsOnDiagnostics
     private static readonly object Sync = new();
     private static readonly Queue<string> Events = new();
     private static readonly List<int> FirstChunkLengths = new();
+    private static readonly BudsOnFrameProbe FrameProbe = new();
     private static readonly Timer ReportTimer = new(_ => SaveReport());
     private static bool _savePending;
     private static long _chunks;
     private static long _bytes;
+    private static int? _macBattery;
+
+    public static void SetMacBattery(int? battery)
+    {
+        lock (Sync)
+        {
+            if (_macBattery == battery)
+                return;
+            _macBattery = battery;
+            ScheduleSave();
+        }
+    }
 
     public static void Record(string text)
     {
@@ -234,14 +511,24 @@ internal static class BudsOnDiagnostics
         }
     }
 
-    public static void RecordRx(int bytes)
+    public static void ResetReceiveStream()
+    {
+        lock (Sync)
+        {
+            FrameProbe.ResetStream();
+            ScheduleSave();
+        }
+    }
+
+    public static void RecordRx(byte[] frame)
     {
         lock (Sync)
         {
             _chunks++;
-            _bytes += bytes;
+            _bytes += frame.Length;
             if (FirstChunkLengths.Count < 16)
-                FirstChunkLengths.Add(bytes);
+                FirstChunkLengths.Add(frame.Length);
+            FrameProbe.Append(frame);
             ScheduleSave();
         }
     }
@@ -291,9 +578,12 @@ internal static class BudsOnDiagnostics
             if (Events.Count == 0)
                 lines.Add("No Buds On connection attempt recorded. Select Galaxy Buds On and click Connect.");
             lines.AddRange(Events);
+            if (_macBattery is int battery)
+                lines.Add($"Headset battery reported by macOS: {battery}%");
             lines.Add($"Received RFCOMM chunks: {_chunks} ({_bytes} bytes)");
             if (FirstChunkLengths.Count > 0)
                 lines.Add($"First chunk sizes: {string.Join(", ", FirstChunkLengths)}");
+            lines.AddRange(FrameProbe.SnapshotLines());
             return string.Join(Environment.NewLine, lines);
         }
     }
@@ -319,6 +609,7 @@ replace_once(bluetooth,
             if (device.Model == Models.BudsOn &&
                 _backend is OSX.BluetoothService macBackend)
             {
+                BudsOnDiagnostics.ResetReceiveStream();
                 BudsOnDiagnostics.Record("Buds On connection requested");
                 await macBackend.ConnectAsync(device.MacAddress, uuid, _connectCancelSource.Token,
                     BudsOnDiagnostics.Record, HandleBudsOnDiagnosticRx);
@@ -343,12 +634,7 @@ replace_once(bluetooth,
     '    private void OnNewDataAvailable(object? sender, byte[] frame)\n',
     '''    private static void HandleBudsOnDiagnosticRx(byte[] frame)
     {
-        BudsOnDiagnostics.RecordRx(frame.Length);
-        if (Environment.GetEnvironmentVariable("GALAXYBUDS_ON_LOG_RAW") == "1")
-        {
-            Log.Information("Buds On raw RX ({Length} bytes): {Hex}",
-                frame.Length, Convert.ToHexString(frame));
-        }
+        BudsOnDiagnostics.RecordRx(frame);
     }
 
     private void OnNewDataAvailable(object? sender, byte[] frame)
@@ -595,5 +881,100 @@ replace_once(native + 'src/Bluetooth.mm',
 
     if (channel != nil) {
         if (![channel isOpen]) {''')
+
+home_view = 'GalaxyBudsClient/Interface/Pages/HomePage.axaml'
+replace_once(home_view,
+    '                    <controls:EarbudStatusUnit Margin="0, 30" />\n',
+    '''                    <StackPanel>
+                        <controls:EarbudStatusUnit Margin="0, 30" />
+                        <TextBlock Text="{Binding BudsOnBatteryText}"
+                                   IsVisible="{Binding HasBudsOnBattery}"
+                                   ToolTip.Tip="Headset battery level reported by macOS"
+                                   HorizontalAlignment="Center"
+                                   Margin="0,0,0,16" />
+                    </StackPanel>
+''')
+
+home_vm = 'GalaxyBudsClient/Interface/ViewModels/Pages/HomePageViewModel.cs'
+replace_once(home_vm,
+    'using System.Threading.Tasks;\n',
+    'using System.Threading;\nusing System.Threading.Tasks;\n')
+replace_once(home_vm,
+    'using GalaxyBudsClient.Platform;\n',
+    'using GalaxyBudsClient.Platform;\nusing GalaxyBudsClient.Model.Constants;\nusing ReactiveUI;\n')
+replace_once(home_vm,
+    '    private readonly DispatcherTimer _refreshTimer = new();\n',
+    '''    private readonly DispatcherTimer _refreshTimer = new();
+    private bool _readingBudsOnBattery;
+    private string? _budsOnBatteryText;
+
+    public bool HasBudsOnBattery => _budsOnBatteryText != null;
+
+    public string? BudsOnBatteryText
+    {
+        get => _budsOnBatteryText;
+        private set
+        {
+            this.RaiseAndSetIfChanged(ref _budsOnBatteryText, value);
+            this.RaisePropertyChanged(nameof(HasBudsOnBattery));
+        }
+    }
+''')
+replace_once(home_vm,
+    '            if (BluetoothImpl.Instance.IsConnected)\n                await BluetoothImpl.Instance.SendRequestAsync(MsgIds.DEBUG_GET_ALL_DATA);\n',
+    '''            if (BluetoothImpl.Instance.CurrentModel == Models.BudsOn)
+                await RefreshBudsOnBatteryAsync();
+            else if (BluetoothImpl.Instance.IsConnected)
+                await BluetoothImpl.Instance.SendRequestAsync(MsgIds.DEBUG_GET_ALL_DATA);
+''')
+replace_once(home_vm,
+    '        SppMessageReceiver.Instance.StatusUpdate += OnStatusUpdateReceived;\n',
+    '''        BluetoothImpl.Instance.Device.DeviceChanged += (_, _) =>
+            Dispatcher.UIThread.Post(() =>
+            {
+                BudsOnBatteryText = null;
+                BudsOnDiagnostics.SetMacBattery(null);
+            });
+        SppMessageReceiver.Instance.StatusUpdate += OnStatusUpdateReceived;
+''')
+replace_once(home_vm,
+    '            await Task.Delay(1000);\n            await BluetoothImpl.Instance.SendRequestAsync(MsgIds.DEBUG_GET_ALL_DATA);\n',
+    '''            await Task.Delay(1000);
+            if (BluetoothImpl.Instance.CurrentModel != Models.BudsOn)
+                await BluetoothImpl.Instance.SendRequestAsync(MsgIds.DEBUG_GET_ALL_DATA);
+''')
+replace_once(home_vm,
+    '    public override void OnNavigatedTo() => _refreshTimer.Start();\n',
+    '''    private async Task RefreshBudsOnBatteryAsync()
+    {
+        var bluetooth = BluetoothImpl.Instance;
+        var device = bluetooth.Device.Current;
+        if (_readingBudsOnBattery || !PlatformUtils.IsOSX || device?.Model != Models.BudsOn
+            || string.IsNullOrWhiteSpace(device.Name))
+            return;
+
+        var name = device.Name;
+        _readingBudsOnBattery = true;
+        try
+        {
+            var battery = await BudsOnMacBattery.ReadAsync(name, CancellationToken.None);
+            if (!ReferenceEquals(bluetooth.Device.Current, device) || device.Name != name)
+                return;
+
+            BudsOnBatteryText = battery is int percentage ? $"Battery {percentage}%" : null;
+            BudsOnDiagnostics.SetMacBattery(battery);
+        }
+        finally
+        {
+            _readingBudsOnBattery = false;
+        }
+    }
+
+    public override void OnNavigatedTo()
+    {
+        _refreshTimer.Start();
+        _ = RefreshBudsOnBatteryAsync();
+    }
+''')
 
 print('Done. Buds On connection diagnostics enabled. All Buds On protocol writes are blocked.')
