@@ -20,6 +20,16 @@ No local Xcode installation or Apple App Store sign-in is needed. The cloud work
 
 The preview also saves the report automatically as `~/Library/Application Support/GalaxyBudsClient/buds-on-connection-report.txt`. If Settings is unavailable, open that file after a connection attempt to read the same report.
 
+## Compare a Samsung call setting
+
+Use the **Answer call or end call** toggle in the Buds On settings on your Galaxy phone. Keep Buds Manager open throughout the comparison.
+
+1. With the toggle in its original state, connect the earbuds to the Mac and wait for a new status message.
+2. Switch only that toggle on the phone and reconnect the earbuds to the Mac if the phone took the connection.
+3. Restore the original toggle value and reconnect to the Mac again if needed.
+
+The report records the initial candidate value for each Mac connection and any changes within it. Compare that sequence with the three observed Samsung states. It contains only the selected bit and connection and frame counters. A repeatable change corroborates a read-only setting. Changes to this setting are made on the phone for this test.
+
 ## Current support
 
 - The app recognizes Buds On by Bluetooth name. The macOS connection attempts Bluetooth service discovery and tries the existing Galaxy Buds management UUID. The report distinguishes a refreshed service list from a potentially cached one.
