@@ -242,27 +242,45 @@ using GalaxyBudsClient.Utils;
 namespace GalaxyBudsClient.Platform;
 
 // Caller serializes all access. The stream buffer retains at most one maximum-size
-// modern SPP frame, and the report contains only metadata and battery candidates.
+// modern SPP frame. The report contains metadata and specific diagnostic candidates.
 internal sealed class BudsOnFrameProbe
 {
     private const byte Start = (byte)MsgConstants.Som;
     private const byte End = (byte)MsgConstants.Eom;
     private const int MaximumBodyLength = 0x03ff;
     private const int MaximumSignatures = 32;
+    private const int MaximumCallDoubleTapObservations = 24;
+    private const int TouchOptionsOffset = 10;
+    private const int CallDoubleTapMask = 0x10;
 
     private readonly byte[] _pending = new byte[MaximumBodyLength + 4];
     private readonly Dictionary<(byte Id, int PayloadLength), long> _signatures = new();
+    private readonly Queue<(long Connection, long Frame, bool BitSet)> _callDoubleTapObservations = new();
+    private bool _observeSettings;
+    private long _settingsConnection;
+    private bool? _lastCallDoubleTapBit;
     private int _pendingLength;
     private long _validFrames;
     private long _otherSignatures;
     private (long Count, byte Left, byte Right, byte Case) _basicStatus;
     private (long Count, byte Left, byte Right, byte Case) _extendedStatus;
 
-    public void ResetStream()
+    public void ResetStream(bool observeSettings, bool newSettingsDevice)
     {
         _pendingLength = 0;
         _basicStatus = default;
         _extendedStatus = default;
+        _observeSettings = observeSettings;
+        _lastCallDoubleTapBit = null;
+
+        if (newSettingsDevice)
+        {
+            _callDoubleTapObservations.Clear();
+            _settingsConnection = 0;
+        }
+
+        if (observeSettings)
+            _settingsConnection++;
     }
 
     public void Append(byte[] chunk)
@@ -341,11 +359,25 @@ internal sealed class BudsOnFrameProbe
         var payload = _pending.AsSpan(4, payloadLength);
         if (id == (byte)MsgIds.STATUS_UPDATED && payloadLength >= 7)
             RecordBatteryCandidate(payload, batteryOffset: 1, ref _basicStatus);
-        if (id == (byte)MsgIds.EXTENDED_STATUS_UPDATED && payloadLength == 63)
-            RecordBatteryCandidate(payload, batteryOffset: 2, ref _extendedStatus);
+        if (id == (byte)MsgIds.EXTENDED_STATUS_UPDATED && payloadLength == 63 &&
+            RecordBatteryCandidate(payload, batteryOffset: 2, ref _extendedStatus))
+        {
+            RecordCallDoubleTapCandidate((payload[TouchOptionsOffset] & CallDoubleTapMask) != 0);
+        }
     }
 
-    private static void RecordBatteryCandidate(ReadOnlySpan<byte> payload, int batteryOffset,
+    private void RecordCallDoubleTapCandidate(bool bitSet)
+    {
+        if (!_observeSettings || _lastCallDoubleTapBit == bitSet)
+            return;
+
+        _lastCallDoubleTapBit = bitSet;
+        if (_callDoubleTapObservations.Count == MaximumCallDoubleTapObservations)
+            _callDoubleTapObservations.Dequeue();
+        _callDoubleTapObservations.Enqueue((_settingsConnection, _validFrames, bitSet));
+    }
+
+    private static bool RecordBatteryCandidate(ReadOnlySpan<byte> payload, int batteryOffset,
         ref (long Count, byte Left, byte Right, byte Case) status)
     {
         var left = payload[batteryOffset];
@@ -355,9 +387,10 @@ internal sealed class BudsOnFrameProbe
         if (left > 101 || right > 101 || caseBattery > 101 ||
             payload[batteryOffset + 2] > 1 || payload[batteryOffset + 3] > 1 ||
             (placement >> 4) > 4 || (placement & 0x0f) > 4)
-            return;
+            return false;
 
         status = (status.Count + 1, left, right, caseBattery);
+        return true;
     }
 
     public (int? Earbuds, int? Case) GetBattery()
@@ -381,6 +414,10 @@ internal sealed class BudsOnFrameProbe
             yield return FormatBatteryCandidate((byte)MsgIds.STATUS_UPDATED, _basicStatus);
         if (_extendedStatus.Count >= 2)
             yield return FormatBatteryCandidate((byte)MsgIds.EXTENDED_STATUS_UPDATED, _extendedStatus);
+        if (_callDoubleTapObservations.Count > 0)
+            yield return "Unverified call double-tap candidate in 0x61 payload byte 10, bit 4";
+        foreach (var (connection, frame, bitSet) in _callDoubleTapObservations)
+            yield return $"  Connection {connection}, valid frame {frame}: bit {(bitSet ? "set" : "clear")}";
     }
 
     private static string FormatBatteryCandidate(byte id, (long Count, byte Left, byte Right, byte Case) status) =>
@@ -519,6 +556,7 @@ internal static class BudsOnDiagnostics
     private static long _bytes;
     private static int? _macBattery;
     private static Device? _receiveDevice;
+    private static Device? _settingsDevice;
 
     public static (int? Earbuds, int? Case) GetBattery(Device device)
     {
@@ -553,7 +591,10 @@ internal static class BudsOnDiagnostics
         lock (Sync)
         {
             _receiveDevice = device;
-            FrameProbe.ResetStream();
+            var newSettingsDevice = device != null && !ReferenceEquals(_settingsDevice, device);
+            if (newSettingsDevice)
+                _settingsDevice = device;
+            FrameProbe.ResetStream(observeSettings: device != null, newSettingsDevice);
             ScheduleSave();
         }
     }
