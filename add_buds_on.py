@@ -249,16 +249,22 @@ internal sealed class BudsOnFrameProbe
     private const byte End = (byte)MsgConstants.Eom;
     private const int MaximumBodyLength = 0x03ff;
     private const int MaximumSignatures = 32;
-    private const int MaximumCallDoubleTapObservations = 24;
-    private const int TouchOptionsOffset = 10;
-    private const int CallDoubleTapMask = 0x10;
+    private const int MaximumSettingsObservations = 32;
+    private const int EqualizerOffset = 9;
+    private const int GestureFlagsOffset = 10;
+    private const int HoldAssignmentsOffset = 11;
+    // Bits 0–5 and 7 are candidates for the controls visible in Galaxy Wearable.
+    private const byte ObservedGestureMask = 0xBF;
+
+    private readonly record struct SettingsSnapshot(byte EqualizerCode, byte GestureFlags,
+        byte LeftHoldCode, byte RightHoldCode);
 
     private readonly byte[] _pending = new byte[MaximumBodyLength + 4];
     private readonly Dictionary<(byte Id, int PayloadLength), long> _signatures = new();
-    private readonly Queue<(long Connection, long Frame, bool BitSet)> _callDoubleTapObservations = new();
+    private readonly Queue<(long Connection, long Frame, SettingsSnapshot Settings)> _settingsObservations = new();
     private bool _observeSettings;
     private long _settingsConnection;
-    private bool? _lastCallDoubleTapBit;
+    private SettingsSnapshot? _lastSettings;
     private int _pendingLength;
     private long _validFrames;
     private long _otherSignatures;
@@ -271,11 +277,11 @@ internal sealed class BudsOnFrameProbe
         _basicStatus = default;
         _extendedStatus = default;
         _observeSettings = observeSettings;
-        _lastCallDoubleTapBit = null;
+        _lastSettings = null;
 
         if (newSettingsDevice)
         {
-            _callDoubleTapObservations.Clear();
+            _settingsObservations.Clear();
             _settingsConnection = 0;
         }
 
@@ -362,19 +368,26 @@ internal sealed class BudsOnFrameProbe
         if (id == (byte)MsgIds.EXTENDED_STATUS_UPDATED && payloadLength == 63 &&
             RecordBatteryCandidate(payload, batteryOffset: 2, ref _extendedStatus))
         {
-            RecordCallDoubleTapCandidate((payload[TouchOptionsOffset] & CallDoubleTapMask) != 0);
+            RecordSettingsCandidate(payload);
         }
     }
 
-    private void RecordCallDoubleTapCandidate(bool bitSet)
+    private void RecordSettingsCandidate(ReadOnlySpan<byte> payload)
     {
-        if (!_observeSettings || _lastCallDoubleTapBit == bitSet)
+        if (!_observeSettings)
             return;
 
-        _lastCallDoubleTapBit = bitSet;
-        if (_callDoubleTapObservations.Count == MaximumCallDoubleTapObservations)
-            _callDoubleTapObservations.Dequeue();
-        _callDoubleTapObservations.Enqueue((_settingsConnection, _validFrames, bitSet));
+        var assignments = payload[HoldAssignmentsOffset];
+        var settings = new SettingsSnapshot(payload[EqualizerOffset],
+            (byte)(payload[GestureFlagsOffset] & ObservedGestureMask),
+            (byte)(assignments >> 4), (byte)(assignments & 0x0F));
+        if (_lastSettings == settings)
+            return;
+
+        _lastSettings = settings;
+        if (_settingsObservations.Count == MaximumSettingsObservations)
+            _settingsObservations.Dequeue();
+        _settingsObservations.Enqueue((_settingsConnection, _validFrames, settings));
     }
 
     private static bool RecordBatteryCandidate(ReadOnlySpan<byte> payload, int batteryOffset,
@@ -414,11 +427,22 @@ internal sealed class BudsOnFrameProbe
             yield return FormatBatteryCandidate((byte)MsgIds.STATUS_UPDATED, _basicStatus);
         if (_extendedStatus.Count >= 2)
             yield return FormatBatteryCandidate((byte)MsgIds.EXTENDED_STATUS_UPDATED, _extendedStatus);
-        if (_callDoubleTapObservations.Count > 0)
-            yield return "Unverified call double-tap candidate in 0x61 payload byte 10, bit 4";
-        foreach (var (connection, frame, bitSet) in _callDoubleTapObservations)
-            yield return $"  Connection {connection}, valid frame {frame}: bit {(bitSet ? "set" : "clear")}";
+        if (_settingsObservations.Count > 0)
+            yield return "Unverified Buds On candidate settings (extended status 0x61)";
+        foreach (var (connection, frame, settings) in _settingsObservations)
+            yield return $"  Connection {connection}, valid frame {frame} | {FormatSettings(settings)}";
     }
+
+    private static string FormatSettings(SettingsSnapshot settings)
+    {
+        var flags = settings.GestureFlags;
+        return $"EQ code {settings.EqualizerCode} | Hold codes L={settings.LeftHoldCode} R={settings.RightHoldCode} | " +
+            $"Touch master candidate {FormatFlag(flags, 7)}, tap {FormatFlag(flags, 3)}, double {FormatFlag(flags, 2)}, " +
+            $"triple {FormatFlag(flags, 1)}, hold {FormatFlag(flags, 0)} | " +
+            $"Call double {FormatFlag(flags, 4)}, call hold {FormatFlag(flags, 5)}";
+    }
+
+    private static string FormatFlag(byte flags, int bit) => (flags & (1 << bit)) != 0 ? "on" : "off";
 
     private static string FormatBatteryCandidate(byte id, (long Count, byte Left, byte Right, byte Case) status) =>
         $"Candidate battery fields from {status.Count} matching 0x{id:X2} status frames: " +
