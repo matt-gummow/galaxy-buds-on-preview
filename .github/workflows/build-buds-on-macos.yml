@@ -1,0 +1,100 @@
+name: Build Galaxy Buds On diagnostic app (macOS)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-buds-on-macos.yml'
+      - 'add_buds_on.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos-arm64:
+    name: Build Apple Silicon .pkg
+    runs-on: xcode-27
+    timeout-minutes: 90
+    steps:
+      - name: Checkout diagnostic patch
+        uses: actions/checkout@v7
+
+      - name: Checkout pinned GalaxyBudsClient source
+        uses: actions/checkout@v7
+        with:
+          repository: timschneeb/GalaxyBudsClient
+          ref: 85dfc8bb39fc45d3c30ecf71ab2c663fb1d41729
+          path: GalaxyBudsClient-source
+          persist-credentials: false
+
+      - name: Install .NET SDK 11 from upstream global.json
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: GalaxyBudsClient-source/global.json
+
+      - name: Print build tools
+        shell: bash
+        run: |
+          xcodebuild -version
+          dotnet --version
+          uname -m
+
+      - name: Apply Buds On diagnostic patch (writes disabled)
+        shell: bash
+        run: python3 add_buds_on.py GalaxyBudsClient-source
+
+      - name: Build native macOS Bluetooth library
+        shell: bash
+        run: |
+          ROOT="$GITHUB_WORKSPACE/GalaxyBudsClient-source"
+          xcodebuild \
+            -project "$ROOT/GalaxyBudsClient.Platform.OSX/Native/NativeInterop.xcodeproj" \
+            -scheme NativeInterop \
+            -configuration Release \
+            -destination 'platform=macOS,arch=arm64' \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            CONFIGURATION_BUILD_DIR="$ROOT/GalaxyBudsClient.Platform.OSX/Native/Build/Release" \
+            CONFIGURATION_TEMP_DIR="$ROOT/GalaxyBudsClient.Platform.OSX/Native/Build/Intermediates.noindex" \
+            build
+          test -f "$ROOT/GalaxyBudsClient.Platform.OSX/Native/Build/Release/libNativeInterop.dylib"
+
+      - name: Install macOS .NET workload
+        shell: bash
+        working-directory: GalaxyBudsClient-source
+        run: dotnet workload install macos
+
+      - name: Restore .NET dependencies
+        shell: bash
+        working-directory: GalaxyBudsClient-source
+        run: |
+          dotnet restore \
+            -p:UseMacOSSDK=true \
+            -r osx-arm64 \
+            --configfile GalaxyBudsClient/nuget.config \
+            GalaxyBudsClient/GalaxyBudsClient.csproj
+
+      - name: Publish macOS Apple Silicon installer
+        shell: bash
+        working-directory: GalaxyBudsClient-source
+        run: |
+          dotnet publish \
+            -p:UseMacOSSDK=true \
+            -f net11.0-macos \
+            -r osx-arm64 \
+            -o out/buds-on-arm64 \
+            -c Release \
+            --self-contained true \
+            --no-restore \
+            GalaxyBudsClient/GalaxyBudsClient.csproj
+          echo 'Installer outputs:'
+          find out/buds-on-arm64 -maxdepth 1 -type f -name '*.pkg' -print
+          test -n "$(find out/buds-on-arm64 -maxdepth 1 -type f -name '*.pkg' -print -quit)"
+
+      - name: Upload macOS installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: GalaxyBudsOn-diagnostic-macos-arm64
+          path: GalaxyBudsClient-source/out/buds-on-arm64/*.pkg
+          if-no-files-found: error
+          retention-days: 14
