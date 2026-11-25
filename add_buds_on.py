@@ -150,10 +150,11 @@ replace_once(mac_bluetooth,
     '''        private string _currentUuid = string.Empty;
         private Action<string>? _currentDiagnostics;
         private Action<byte[]>? _currentDiagnosticRx;
+        private Action? _currentDiagnosticStarted;
 ''')
 replace_once(mac_bluetooth,
     'await ConnectAsync(_currentMac, _currentUuid, CancellationToken.None);',
-    'await ConnectAsync(_currentMac, _currentUuid, CancellationToken.None,\n                            _currentDiagnostics, _currentDiagnosticRx);')
+    'await ConnectAsync(_currentMac, _currentUuid, CancellationToken.None,\n                            _currentDiagnostics, _currentDiagnosticRx, _currentDiagnosticStarted);')
 replace_once(mac_bluetooth,
     '                NewDataAvailable?.Invoke(this, byteArray);\n',
     '''                if (_currentDiagnosticRx is { } diagnosticRx)
@@ -164,10 +165,10 @@ replace_once(mac_bluetooth,
 replace_once(mac_bluetooth,
     '        public async Task ConnectAsync(string macAddress, string uuid, CancellationToken cancelToken)\n',
     '''        public Task ConnectAsync(string macAddress, string uuid, CancellationToken cancelToken) =>
-            ConnectAsync(macAddress, uuid, cancelToken, null, null);
+            ConnectAsync(macAddress, uuid, cancelToken, null, null, null);
 
         public async Task ConnectAsync(string macAddress, string uuid, CancellationToken cancelToken,
-            Action<string>? diagnostics, Action<byte[]>? diagnosticRx)
+            Action<string>? diagnostics, Action<byte[]>? diagnosticRx, Action? diagnosticStarted)
 ''')
 replace_once(mac_bluetooth,
     '                    Log.Debug("OSX.BluetoothService: Already connected, skipped");\n',
@@ -181,6 +182,8 @@ replace_once(mac_bluetooth,
     '''                _currentUuid = uuid;
                 _currentDiagnostics = diagnostics;
                 _currentDiagnosticRx = diagnosticRx;
+                _currentDiagnosticStarted = diagnosticStarted;
+                diagnosticStarted?.Invoke();
                 diagnostics?.Invoke($"Requested RFCOMM service UUID: {uuid}");
 ''')
 replace_once(mac_bluetooth,
@@ -210,6 +213,22 @@ replace_once(mac_bluetooth,
 replace_once(bluetooth,
     '    private void OnDisconnected(object? sender, string reason)\n    {\n',
     '''    private void OnDisconnected(object? sender, string reason)
+    {
+        if (CurrentModel == Models.BudsOn)
+            BudsOnDiagnostics.ResetReceiveStream();
+''')
+
+
+replace_once(bluetooth,
+    '    public async Task DisconnectAsync(bool alternative = false)\n    {\n',
+    '''    public async Task DisconnectAsync(bool alternative = false)
+    {
+        if (CurrentModel == Models.BudsOn)
+            BudsOnDiagnostics.ResetReceiveStream();
+''')
+replace_once(bluetooth,
+    '    private void OnBluetoothError(BluetoothException exception)\n    {\n',
+    '''    private void OnBluetoothError(BluetoothException exception)
     {
         if (CurrentModel == Models.BudsOn)
             BudsOnDiagnostics.ResetReceiveStream();
@@ -322,7 +341,7 @@ internal sealed class BudsOnFrameProbe
         var payload = _pending.AsSpan(4, payloadLength);
         if (id == (byte)MsgIds.STATUS_UPDATED && payloadLength >= 7)
             RecordBatteryCandidate(payload, batteryOffset: 1, ref _basicStatus);
-        if (id == (byte)MsgIds.EXTENDED_STATUS_UPDATED && payloadLength >= 8)
+        if (id == (byte)MsgIds.EXTENDED_STATUS_UPDATED && payloadLength == 63)
             RecordBatteryCandidate(payload, batteryOffset: 2, ref _extendedStatus);
     }
 
@@ -339,6 +358,16 @@ internal sealed class BudsOnFrameProbe
             return;
 
         status = (status.Count + 1, left, right, caseBattery);
+    }
+
+    public (int? Earbuds, int? Case) GetBattery()
+    {
+        if (_extendedStatus.Count < 2)
+            return (null, null);
+
+        var (_, left, right, caseBattery) = _extendedStatus;
+        int? earbuds = left <= 100 && right <= 100 ? Math.Min(left, right) : null;
+        return (earbuds, caseBattery <= 100 ? caseBattery : null);
     }
 
     public IEnumerable<string> SnapshotLines()
@@ -474,6 +503,7 @@ write_once('GalaxyBudsClient/Platform/BudsOnDiagnostics.cs', '''using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading;
+using GalaxyBudsClient.Model.Config;
 
 namespace GalaxyBudsClient.Platform;
 
@@ -488,6 +518,13 @@ internal static class BudsOnDiagnostics
     private static long _chunks;
     private static long _bytes;
     private static int? _macBattery;
+    private static Device? _receiveDevice;
+
+    public static (int? Earbuds, int? Case) GetBattery(Device device)
+    {
+        lock (Sync)
+            return ReferenceEquals(_receiveDevice, device) ? FrameProbe.GetBattery() : (null, null);
+    }
 
     public static void SetMacBattery(int? battery)
     {
@@ -511,19 +548,22 @@ internal static class BudsOnDiagnostics
         }
     }
 
-    public static void ResetReceiveStream()
+    public static void ResetReceiveStream(Device? device = null)
     {
         lock (Sync)
         {
+            _receiveDevice = device;
             FrameProbe.ResetStream();
             ScheduleSave();
         }
     }
 
-    public static void RecordRx(byte[] frame)
+    public static void RecordRx(Device? device, byte[] frame)
     {
         lock (Sync)
         {
+            if (!ReferenceEquals(_receiveDevice, device))
+                return;
             _chunks++;
             _bytes += frame.Length;
             if (FirstChunkLengths.Count < 16)
@@ -609,10 +649,11 @@ replace_once(bluetooth,
             if (device.Model == Models.BudsOn &&
                 _backend is OSX.BluetoothService macBackend)
             {
-                BudsOnDiagnostics.ResetReceiveStream();
                 BudsOnDiagnostics.Record("Buds On connection requested");
                 await macBackend.ConnectAsync(device.MacAddress, uuid, _connectCancelSource.Token,
-                    BudsOnDiagnostics.Record, HandleBudsOnDiagnosticRx);
+                    BudsOnDiagnostics.Record,
+                    frame => BudsOnDiagnostics.RecordRx(device, frame),
+                    () => BudsOnDiagnostics.ResetReceiveStream(device));
                 return true;
             }
 #endif
@@ -631,19 +672,10 @@ replace_once(bluetooth,
         }
 ''')
 replace_once(bluetooth,
-    '    private void OnNewDataAvailable(object? sender, byte[] frame)\n',
-    '''    private static void HandleBudsOnDiagnosticRx(byte[] frame)
-    {
-        BudsOnDiagnostics.RecordRx(frame);
-    }
-
-    private void OnNewDataAvailable(object? sender, byte[] frame)
-''')
-replace_once(bluetooth,
     '        /* Discard data if not properly registered */\n',
     '''        if (CurrentModel == Models.BudsOn)
         {
-            HandleBudsOnDiagnosticRx(frame);
+            BudsOnDiagnostics.RecordRx(null, frame);
             return;
         }
 
@@ -889,7 +921,6 @@ replace_once(home_view,
                         <controls:EarbudStatusUnit Margin="0, 30" />
                         <TextBlock Text="{Binding BudsOnBatteryText}"
                                    IsVisible="{Binding HasBudsOnBattery}"
-                                   ToolTip.Tip="Headset battery level reported by macOS"
                                    HorizontalAlignment="Center"
                                    Margin="0,0,0,16" />
                     </StackPanel>
@@ -901,7 +932,7 @@ replace_once(home_vm,
     'using System.Threading;\nusing System.Threading.Tasks;\n')
 replace_once(home_vm,
     'using GalaxyBudsClient.Platform;\n',
-    'using GalaxyBudsClient.Platform;\nusing GalaxyBudsClient.Model.Constants;\nusing ReactiveUI;\n')
+    'using GalaxyBudsClient.Platform;\nusing GalaxyBudsClient.Model.Config;\nusing GalaxyBudsClient.Model.Constants;\nusing ReactiveUI;\n')
 replace_once(home_vm,
     '    private readonly DispatcherTimer _refreshTimer = new();\n',
     '''    private readonly DispatcherTimer _refreshTimer = new();
@@ -929,28 +960,53 @@ replace_once(home_vm,
 ''')
 replace_once(home_vm,
     '        SppMessageReceiver.Instance.StatusUpdate += OnStatusUpdateReceived;\n',
-    '''        BluetoothImpl.Instance.Device.DeviceChanged += (_, _) =>
-            Dispatcher.UIThread.Post(() =>
-            {
-                BudsOnBatteryText = null;
-                BudsOnDiagnostics.SetMacBattery(null);
-            });
+    '''        BluetoothImpl.Instance.Device.DeviceChanged += (_, _) => ClearBudsOnBatteryText();
+        BluetoothImpl.Instance.Disconnected += (_, _) => ClearBudsOnBatteryText();
+        BluetoothImpl.Instance.BluetoothError += (_, _) => ClearBudsOnBatteryText();
         SppMessageReceiver.Instance.StatusUpdate += OnStatusUpdateReceived;
 ''')
 replace_once(home_vm,
     '            await Task.Delay(1000);\n            await BluetoothImpl.Instance.SendRequestAsync(MsgIds.DEBUG_GET_ALL_DATA);\n',
     '''            await Task.Delay(1000);
-            if (BluetoothImpl.Instance.CurrentModel != Models.BudsOn)
+            if (BluetoothImpl.Instance.CurrentModel == Models.BudsOn)
+                await RefreshBudsOnBatteryAsync();
+            else
                 await BluetoothImpl.Instance.SendRequestAsync(MsgIds.DEBUG_GET_ALL_DATA);
 ''')
 replace_once(home_vm,
     '    public override void OnNavigatedTo() => _refreshTimer.Start();\n',
-    '''    private async Task RefreshBudsOnBatteryAsync()
+    '''    private void ClearBudsOnBatteryText() =>
+        Dispatcher.UIThread.Post(() =>
+        {
+            BudsOnBatteryText = null;
+            BudsOnDiagnostics.SetMacBattery(null);
+        });
+
+    private bool ShowBudsOnFrameBattery(BluetoothImpl bluetooth, Device device)
+    {
+        if (!bluetooth.IsConnected)
+            return false;
+
+        var (earbuds, caseBattery) = BudsOnDiagnostics.GetBattery(device);
+        if (earbuds is int level)
+            BudsOnBatteryText = caseBattery is int caseLevel
+                ? $"Earbuds {level}% · Case {caseLevel}%"
+                : $"Earbuds {level}%";
+        else if (caseBattery is int caseOnly)
+            BudsOnBatteryText = $"Case {caseOnly}%";
+        else
+            return false;
+
+        return true;
+    }
+
+    private async Task RefreshBudsOnBatteryAsync()
     {
         var bluetooth = BluetoothImpl.Instance;
         var device = bluetooth.Device.Current;
-        if (_readingBudsOnBattery || !PlatformUtils.IsOSX || device?.Model != Models.BudsOn
-            || string.IsNullOrWhiteSpace(device.Name))
+        if (!PlatformUtils.IsOSX || device?.Model != Models.BudsOn ||
+            ShowBudsOnFrameBattery(bluetooth, device) || _readingBudsOnBattery ||
+            string.IsNullOrWhiteSpace(device.Name))
             return;
 
         var name = device.Name;
@@ -961,8 +1017,9 @@ replace_once(home_vm,
             if (!ReferenceEquals(bluetooth.Device.Current, device) || device.Name != name)
                 return;
 
-            BudsOnBatteryText = battery is int percentage ? $"Battery {percentage}%" : null;
             BudsOnDiagnostics.SetMacBattery(battery);
+            if (!ShowBudsOnFrameBattery(bluetooth, device))
+                BudsOnBatteryText = battery is int percentage ? $"Battery {percentage}% (macOS)" : null;
         }
         finally
         {
