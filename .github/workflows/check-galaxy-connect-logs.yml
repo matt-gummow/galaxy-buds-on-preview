@@ -1,0 +1,23 @@
+name: Windows Galaxy Connect log reader
+on:
+  push:
+    branches: [diagnostics/buds-on-control-trace]
+    paths:
+      - 'tools/galaxy-connect-logs/**'
+      - '.github/workflows/check-galaxy-connect-logs.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test-and-package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile with Windows PowerShell and test log classification
+        shell: powershell
+        run: ./tools/galaxy-connect-logs/tests/check.ps1 -OutputFolder (Join-Path $env:RUNNER_TEMP 'galaxy-connect-kit')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Galaxy-Connect-Handoff-Check
+          path: ${{ runner.temp }}/galaxy-connect-kit/
+          if-no-files-found: error

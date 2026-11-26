@@ -1,0 +1,24 @@
+name: Inspect Galaxy Connect package
+on:
+  push:
+    branches: [diagnostics/buds-on-control-trace]
+    paths:
+      - 'tools/galaxy-connect/inspect_store.py'
+      - '.github/workflows/inspect-galaxy-connect.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect Microsoft Store package without installing it
+        shell: pwsh
+        run: python tools/galaxy-connect/inspect_store.py "$env:RUNNER_TEMP/galaxy-connect-inspection.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Galaxy-Connect-static-inspection
+          path: ${{ runner.temp }}/galaxy-connect-inspection.txt
+          if-no-files-found: error
