@@ -137,7 +137,10 @@ static Peer *PairedBuds(void) {
 }
 - (void)beginSetup {
     NSMutableArray *steps = self.steps;
-    [self startBookHostSetup:^(NSString *stage, NSString *detail) { [steps addObject:stage]; }];
+    [self startBookHostSetup:^(NSString *stage, NSString *detail) {
+        NSCAssert(detail.length > 0, @"Setup events need a report detail");
+        [steps addObject:stage];
+    }];
 }
 @end
 
@@ -289,6 +292,7 @@ static void TestBookHostSetup(void) {
     rig = [Rig new]; MarkSamsungService(rig.peer);
     __weak Rig *cancelled = rig;
     [rig startBookHostSetup:^(NSString *stage, NSString *detail) {
+        (void)detail;
         if ([stage isEqual:@"opened"]) [cancelled stop];
     }];
     Drain();
