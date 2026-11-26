@@ -1,11 +1,13 @@
-name: Build Galaxy Buds On diagnostic app (macOS)
+name: Build Buds On audio handoff preview (macOS)
 
 on:
   push:
-    branches: [main]
+    branches: [experimental/buds-on-mac-handoff]
     paths:
       - '.github/workflows/build-buds-on-macos.yml'
       - 'add_buds_on.py'
+      - 'patches/buds-on-mac-handoff.patch'
+      - 'tests/**'
   workflow_dispatch:
 
 permissions:
@@ -48,6 +50,14 @@ jobs:
       - name: Apply Buds On preview patch
         shell: bash
         run: python3 add_buds_on.py GalaxyBudsClient-source
+
+      - name: Apply and test the handoff experiment
+        shell: bash
+        working-directory: GalaxyBudsClient-source
+        run: |
+          git apply --check "$GITHUB_WORKSPACE/patches/buds-on-mac-handoff.patch"
+          git apply "$GITHUB_WORKSPACE/patches/buds-on-mac-handoff.patch"
+          bash "$GITHUB_WORKSPACE/tests/run-handoff-tests.sh" "$PWD"
 
       - name: Build native macOS Bluetooth library
         shell: bash
@@ -96,10 +106,32 @@ jobs:
           find out/buds-on-arm64 -maxdepth 1 -type f -name '*.pkg' -print
           test -n "$(find out/buds-on-arm64 -maxdepth 1 -type f -name '*.pkg' -print -quit)"
 
+      - name: Verify the packaged app and handoff entry points
+        shell: bash
+        run: |
+          set -euo pipefail
+          packages=(GalaxyBudsClient-source/out/buds-on-arm64/*.pkg)
+          test "${#packages[@]}" -eq 1
+          pkgutil --expand-full "${packages[0]}" "$RUNNER_TEMP/buds-expanded"
+          bundle="$(find "$RUNNER_TEMP/buds-expanded" -name '*.app' -type d -print -quit)"
+          test -n "$bundle"
+          executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Contents/Info.plist")"
+          lipo -verify_arch arm64 "$bundle/Contents/MacOS/$executable"
+          library="$(find "$bundle" -name libNativeInterop.dylib -type f -print -quit)"
+          test -n "$library"
+          lipo -verify_arch arm64 "$library"
+          nm -gU "$library" > "$RUNNER_TEMP/buds-exports.txt"
+          for suffix in prepare request close; do
+            grep -Eq "[[:space:]]_bt_budson_handoff_${suffix}$" "$RUNNER_TEMP/buds-exports.txt"
+          done
+          mkdir -p installer
+          cp "${packages[0]}" installer/GalaxyBudsOn-Handoff-Preview-macOS-arm64.pkg
+          shasum -a 256 installer/*.pkg
+
       - name: Upload macOS installer
         uses: actions/upload-artifact@v7
         with:
-          name: GalaxyBudsOn-diagnostic-macos-arm64
-          path: GalaxyBudsClient-source/out/buds-on-arm64/*.pkg
+          name: GalaxyBudsOn-handoff-experiment-macos-arm64
+          path: installer/*.pkg
           if-no-files-found: error
           retention-days: 14

@@ -1,0 +1,1375 @@
+diff --git a/GalaxyBudsClient.Platform.OSX/BluetoothService.cs b/GalaxyBudsClient.Platform.OSX/BluetoothService.cs
+index 2bea06f..e758763 100644
+--- a/GalaxyBudsClient.Platform.OSX/BluetoothService.cs
++++ b/GalaxyBudsClient.Platform.OSX/BluetoothService.cs
+@@ -32,6 +32,10 @@ namespace GalaxyBudsClient.Platform.OSX
+ 
+         private readonly unsafe BluetoothImpl* _nativePtr = null;
+ 
++        private readonly object _nativeLifetime = new();
++        private int _activeDiagnosticCalls;
++        private bool _disposeRequested;
++
+         // Prevent garbage collection
+         // ReSharper disable PrivateFieldCanBeConvertedToLocalVariable
+         private Bluetooth.Bt_OnChannelData? _onChannelData;
+@@ -399,24 +403,64 @@ namespace GalaxyBudsClient.Platform.OSX
+             }
+         }
+ 
+-        private bool TrySendBudsOnTest(string expectedMac, Func<ulong?> getCurrentStamp, Func<ulong, bool> send)
++        public unsafe (BudsOnHandoffResult Result, ulong Ticket) PrepareBudsOnHandoff(string expectedMac,
++            Func<bool> authorized)
+         {
+-            if (!ConnSemaphore.Wait(0))
+-                return false;
++            ulong ticket = 0;
++            var result = WithDiagnosticChannel(expectedMac, BudsOnHandoffResult.TargetUnavailable,
++                BudsOnHandoffResult.Busy, () => authorized()
++                    ? Bluetooth.bt_budson_handoff_prepare(_nativePtr, expectedMac, out ticket)
++                    : BudsOnHandoffResult.Stale);
++            return (result, ticket);
++        }
+ 
++        public unsafe BudsOnHandoffResult RequestBudsOnHandoff(string expectedMac, ulong ticket, Func<bool> authorized)
++        {
++            return WithDiagnosticChannel(expectedMac, BudsOnHandoffResult.TargetUnavailable, BudsOnHandoffResult.Busy,
++                () => ticket != 0 && authorized()
++                    ? Bluetooth.bt_budson_handoff_request(_nativePtr, expectedMac, ticket)
++                    : BudsOnHandoffResult.Stale);
++        }
++
++        public unsafe void CloseBudsOnHandoff(ulong ticket)
++        {
++            if (ticket == 0 || !RetainDiagnosticCall())
++                return;
+             try
+             {
+-                if (!SendSemaphore.Wait(0))
+-                    return false;
++                Bluetooth.bt_budson_handoff_close(_nativePtr, ticket);
++            }
++            finally
++            {
++                ReleaseDiagnosticCall();
++            }
++        }
++
++        private bool TrySendBudsOnTest(string expectedMac, Func<ulong?> getCurrentStamp, Func<ulong, bool> send) =>
++            WithDiagnosticChannel(expectedMac, false, false, () => getCurrentStamp() is { } stamp && send(stamp));
+ 
++        private T WithDiagnosticChannel<T>(string expectedMac, T unavailable, T busy, Func<T> operation)
++        {
++            if (!ConnSemaphore.Wait(0))
++                return busy;
++            try
++            {
++                if (!SendSemaphore.Wait(0))
++                    return busy;
+                 try
+                 {
+                     if (_currentDiagnosticRx == null ||
+                         !string.Equals(_currentMac, expectedMac, StringComparison.OrdinalIgnoreCase) ||
+-                        getCurrentStamp() is not { } stamp)
+-                        return false;
+-
+-                    return send(stamp);
++                        !RetainDiagnosticCall())
++                        return unavailable;
++                    try
++                    {
++                        return operation();
++                    }
++                    finally
++                    {
++                        ReleaseDiagnosticCall();
++                    }
+                 }
+                 finally
+                 {
+@@ -429,6 +473,27 @@ namespace GalaxyBudsClient.Platform.OSX
+             }
+         }
+ 
++        private bool RetainDiagnosticCall()
++        {
++            lock (_nativeLifetime)
++            {
++                if (_disposeRequested)
++                    return false;
++                _activeDiagnosticCalls++;
++                return true;
++            }
++        }
++
++        private unsafe void ReleaseDiagnosticCall()
++        {
++            lock (_nativeLifetime)
++            {
++                if (--_activeDiagnosticCalls != 0 || !_disposeRequested)
++                    return;
++            }
++            Bluetooth.bt_free(_nativePtr);
++        }
++
+         public async Task SendAsync(byte[] data)
+         {
+             BT_SEND_RESULT result;
+@@ -479,12 +544,17 @@ namespace GalaxyBudsClient.Platform.OSX
+         }
+         #endregion
+         
+-        public void Dispose()
++        public unsafe void Dispose()
+         {
+-            unsafe
++            lock (_nativeLifetime)
+             {
+-                Bluetooth.bt_free(_nativePtr);
++                if (_disposeRequested)
++                    return;
++                _disposeRequested = true;
++                if (_activeDiagnosticCalls != 0)
++                    return;
+             }
++            Bluetooth.bt_free(_nativePtr);
+         }
+     }
+ }
+diff --git a/GalaxyBudsClient.Platform.OSX/BudsOnAudioRoute.cs b/GalaxyBudsClient.Platform.OSX/BudsOnAudioRoute.cs
+new file mode 100644
+index 0000000..30bd5e3
+--- /dev/null
++++ b/GalaxyBudsClient.Platform.OSX/BudsOnAudioRoute.cs
+@@ -0,0 +1,135 @@
++using System;
++using System.Runtime.InteropServices;
++
++namespace GalaxyBudsClient.Platform.OSX;
++
++/// <summary>One read-only snapshot of the macOS system default audio output.</summary>
++public static class BudsOnAudioRoute
++{
++    private const uint SystemObject = 1;
++    private const uint GlobalScope = 0x676C6F62;   // 'glob'
++    private const uint DefaultOutput = 0x644F7574; // 'dOut'
++    private const uint TransportType = 0x7472616E; // 'tran'
++    private const uint DeviceUid = 0x75696420;     // 'uid '
++
++    private const uint Bluetooth = 0x626C7565;     // 'blue'
++    private const uint BluetoothLe = 0x626C6561;   // 'blea'
++    private const uint BuiltIn = 0x626C746E;       // 'bltn'
++    private const uint DisplayPort = 0x64707274;   // 'dprt'
++    private const uint Hdmi = 0x68646D69;          // 'hdmi'
++    private const uint Usb = 0x75736220;           // 'usb '
++    private const uint AirPlay = 0x61697270;       // 'airp'
++
++    private const string Unavailable = "unavailable";
++    private const string Other = "built-in or other output";
++    private const string Unconfirmed = "Bluetooth identity unconfirmed";
++    private const string OutputSuffix = ":output";
++
++    public static string GetDefaultOutput(string expectedMac)
++    {
++        if (!OperatingSystem.IsMacOS()) return Unavailable;
++        try
++        {
++            if (!TryReadProperty(SystemObject, DefaultOutput, out uint device) || device == 0 ||
++                !TryReadProperty(device, TransportType, out uint transport)) return Unavailable;
++
++            var uid = transport is Bluetooth or BluetoothLe ? ReadUid(device) : null;
++            // A route can disappear or change between the independent HAL property reads.
++            return TryReadProperty(SystemObject, DefaultOutput, out uint current) && current == device
++                ? Classify(transport, uid, expectedMac)
++                : Unavailable;
++        }
++        catch (DllNotFoundException) { return Unavailable; }
++        catch (EntryPointNotFoundException) { return Unavailable; }
++    }
++
++    internal static string Classify(uint transport, string? uid, string expectedMac)
++    {
++        if (transport is not (Bluetooth or BluetoothLe))
++        {
++            // Virtual and aggregate outputs may route onward to any physical device.
++            return transport is BuiltIn or DisplayPort or Hdmi or Usb or AirPlay ? Other : Unavailable;
++        }
++
++        // Match the mac-fold probe: a whole address, optionally followed by ":output".
++        var address = uid?.EndsWith(OutputSuffix, StringComparison.OrdinalIgnoreCase) == true
++            ? uid[..^OutputSuffix.Length] : uid;
++        var actual = CanonicalAddress(address);
++        var expected = CanonicalAddress(expectedMac);
++        if (actual == null || expected == null) return Unconfirmed;
++        if (actual == expected) return "selected Buds";
++        // Core Audio may expose a different identity for an LE route.
++        return transport == Bluetooth ? Other : Unconfirmed;
++    }
++
++    private static string? CanonicalAddress(string? address)
++    {
++        if (address?.Length != 17 || address[2] is not (':' or '-')) return null;
++        for (var i = 0; i < address.Length; i++)
++        {
++            if (i % 3 == 2 ? address[i] != address[2] : !char.IsAsciiHexDigit(address[i])) return null;
++        }
++        var canonical = address.Replace('-', ':').ToUpperInvariant();
++        return canonical is "00:00:00:00:00:00" or "FF:FF:FF:FF:FF:FF" ? null : canonical;
++    }
++
++    private static unsafe string? ReadUid(uint device)
++    {
++        if (!TryReadProperty(device, DeviceUid, out nint uid) || uid == 0) return null;
++        try
++        {
++            // The only recognized forms have 17 or 24 UTF-16 code units.
++            var length = CFStringGetLength(uid);
++            if (length != 17 && length != 17 + OutputSuffix.Length) return null;
++            char* buffer = stackalloc char[(int)length];
++            CFStringGetCharacters(uid, new CFRange(0, length), buffer);
++            return new string(buffer, 0, (int)length);
++        }
++        finally
++        {
++            // kAudioDevicePropertyDeviceUID passes ownership of its CFString to the caller.
++            CFRelease(uid);
++        }
++    }
++
++    private static unsafe bool TryReadProperty<T>(uint device, uint selector, out T value) where T : unmanaged
++    {
++        var address = new PropertyAddress(selector, GlobalScope, 0);
++        var size = (uint)sizeof(T);
++        T data = default;
++        var status = AudioObjectGetPropertyData(device, &address, 0, null, &size, &data);
++        value = data;
++        return status == 0 && size == sizeof(T);
++    }
++
++    [StructLayout(LayoutKind.Sequential)]
++    private readonly struct PropertyAddress(uint selector, uint scope, uint element)
++    {
++        public readonly uint Selector = selector;
++        public readonly uint Scope = scope;
++        public readonly uint Element = element;
++    }
++
++    [StructLayout(LayoutKind.Sequential)]
++    private readonly struct CFRange(nint location, nint length)
++    {
++        public readonly nint Location = location;
++        public readonly nint Length = length;
++    }
++
++    private const string CoreAudio = "/System/Library/Frameworks/CoreAudio.framework/CoreAudio";
++    private const string CoreFoundation = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
++
++    [DllImport(CoreAudio)]
++    private static extern unsafe int AudioObjectGetPropertyData(uint device, PropertyAddress* address,
++        uint qualifierSize, void* qualifier, uint* size, void* data);
++
++    [DllImport(CoreFoundation)]
++    private static extern nint CFStringGetLength(nint value);
++
++    [DllImport(CoreFoundation)]
++    private static extern unsafe void CFStringGetCharacters(nint value, CFRange range, char* characters);
++
++    [DllImport(CoreFoundation)]
++    private static extern void CFRelease(nint value);
++}
+diff --git a/GalaxyBudsClient.Platform.OSX/Native/include/Native.h b/GalaxyBudsClient.Platform.OSX/Native/include/Native.h
+index f81b64d..eaed9a1 100644
+--- a/GalaxyBudsClient.Platform.OSX/Native/include/Native.h
++++ b/GalaxyBudsClient.Platform.OSX/Native/include/Native.h
+@@ -42,6 +42,9 @@ extern BT_SEND_RESULT bt_send(BluetoothImpl *self, void *data, unsigned int leng
+ extern BT_SEND_RESULT bt_send_budson_call_test(BluetoothImpl *self, uint64_t stamp, uint8_t flags, uint8_t mask, uint8_t enabled);
+ extern BT_SEND_RESULT bt_send_budson_eq_test(BluetoothImpl *self, uint64_t stamp, uint8_t preset);
+ extern BT_SEND_RESULT bt_send_budson_option(BluetoothImpl *self, uint64_t stamp, uint8_t control, uint8_t value, uint8_t sibling);
++extern int bt_budson_handoff_prepare(BluetoothImpl *self, const char *expectedMac, uint64_t *ticket);
++extern int bt_budson_handoff_request(BluetoothImpl *self, const char *expectedMac, uint64_t ticket);
++extern void bt_budson_handoff_close(BluetoothImpl *self, uint64_t ticket);
+ extern BT_ENUM_RESULT bt_enumerate(BluetoothImpl *self, EnumerationResult *result);
+ extern bool bt_is_connected(BluetoothImpl *self);
+ 
+diff --git a/GalaxyBudsClient.Platform.OSX/Native/src/Bluetooth.h b/GalaxyBudsClient.Platform.OSX/Native/src/Bluetooth.h
+index 9d32632..6a7b741 100644
+--- a/GalaxyBudsClient.Platform.OSX/Native/src/Bluetooth.h
++++ b/GalaxyBudsClient.Platform.OSX/Native/src/Bluetooth.h
+@@ -66,6 +66,10 @@ typedef void (*Bt_OnDiagnostic)(const char *line);
+ - (BT_SEND_RESULT)sendBudsOnEqualizerTest:(uint64_t)stamp preset:(UInt8)preset;
+ - (BT_SEND_RESULT)sendBudsOnOption:(uint64_t)stamp control:(UInt8)control value:(UInt8)value sibling:(UInt8)sibling;
+ 
++- (int)prepareBudsOnHandoff:(NSString *)expectedMac ticket:(uint64_t *)outTicket;
++- (int)requestBudsOnHandoff:(NSString *)expectedMac ticket:(uint64_t)ticket;
++- (void)closeBudsOnHandoff:(uint64_t)ticket;
++
+ - (void)setOnChannelData:(Bt_OnChannelData)callback;
+ - (void)setOnChannelClosed:(Bt_OnChannelClosed)callback;
+ 
+diff --git a/GalaxyBudsClient.Platform.OSX/Native/src/Bluetooth.mm b/GalaxyBudsClient.Platform.OSX/Native/src/Bluetooth.mm
+index abf3011..9e1b683 100644
+--- a/GalaxyBudsClient.Platform.OSX/Native/src/Bluetooth.mm
++++ b/GalaxyBudsClient.Platform.OSX/Native/src/Bluetooth.mm
+@@ -11,6 +11,8 @@
+ #import "Bluetooth.h"
+ #import "NativeStringUtils.h"
+ #include "BudsOnCallControl.h"
++#include "BudsOnHandoffGate.h"
++#include <time.h>
+ 
+ static void FreeEnumerationDevices(EnumerationResult *result, int initializedCount) {
+     if (result == NULL || result->devices == NULL) {
+@@ -27,10 +29,91 @@ static void FreeEnumerationDevices(EnumerationResult *result, int initializedCou
+     result->length = 0;
+ }
+ 
++// The primary receive stamp advances with each packet. Bind this operation to
++// the opening stamp and both channel objects, independent of incoming traffic.
++@class BudsOnHandoffSession;
++@interface Bluetooth (HandoffLifecycle)
++- (void)endHandoff:(BudsOnHandoffSession *)session;
++@end
++
++@interface BudsOnHandoffSession : NSObject <IOBluetoothRFCOMMChannelDelegate> {
++@public
++    __weak Bluetooth *owner;
++    IOBluetoothRFCOMMChannel *primary;
++    IOBluetoothRFCOMMChannel *secondary;
++    BluetoothConnectionHandle handle;
++    BluetoothRFCOMMChannelID serviceChannel;
++    uint64_t primaryStamp;
++    uint64_t ticket;
++    BudsOnHandoffGate gate;
++    BOOL inFlight;
++    BOOL revoked;
++    BOOL closing;
++}
++@end
++
++@implementation BudsOnHandoffSession
++- (void)rfcommChannelData:(IOBluetoothRFCOMMChannel *)channel data:(void *)data length:(size_t)length {
++    // SMEP input belongs to this short-lived channel. The management parser
++    // accepts a different wire protocol.
++}
++- (void)rfcommChannelClosed:(IOBluetoothRFCOMMChannel *)channel {
++    [owner endHandoff:self];
++}
++@end
++
++static constexpr UInt8 SppNewUuid[16] = {
++    0x2e, 0x73, 0xa4, 0xad, 0x33, 0x2d, 0x41, 0xfc, 0x90, 0xe2, 0x16, 0xbe, 0xf0, 0x65, 0x23, 0xf2
++};
++static constexpr UInt8 SmepUuid[16] = {
++    0xf8, 0x62, 0x06, 0x74, 0xa1, 0xed, 0x41, 0xab, 0xa8, 0xb9, 0xde, 0x9a, 0xd6, 0x55, 0x72, 0x9d
++};
++
++// getServiceRecordForUUID may match a UUID elsewhere in an SDP record.
++// Require one service-class record and reject a second record sharing its channel.
++static BluetoothRFCOMMChannelID UniqueCachedChannel(IOBluetoothDevice *device, const UInt8 (&wanted)[16]) {
++    unsigned int uses[31] = {};
++    BluetoothRFCOMMChannelID result = 0;
++    for (IOBluetoothSDPServiceRecord *record in device.services) {
++        BluetoothRFCOMMChannelID channel = 0;
++        bool rfcomm = [record getRFCOMMChannelID:&channel] == kIOReturnSuccess &&
++            channel > 0 && channel <= 30;
++        if (rfcomm)
++            ++uses[channel];
++        NSArray *classes = [[record getAttributeDataElement:kBluetoothSDPAttributeIdentifierServiceClassIDList] getArrayValue];
++        for (IOBluetoothSDPDataElement *element in classes) {
++            IOBluetoothSDPUUID *uuid = [[element getUUIDValue] getUUIDWithLength:16];
++            if (uuid.length == sizeof(wanted) && memcmp(uuid.bytes, wanted, sizeof(wanted)) == 0) {
++                if (result || !rfcomm)
++                    return 0;
++                result = channel;
++                break;
++            }
++        }
++    }
++    return result && uses[result] == 1 ? result : 0;
++}
++
++static bool MatchesPeer(NSString *expected, NSString *actual) {
++    if (expected.length != 17 || actual.length != 17)
++        return false;
++    NSString *canonicalExpected = [expected stringByReplacingOccurrencesOfString:@"-" withString:@":"];
++    NSString *canonicalActual = [actual stringByReplacingOccurrencesOfString:@"-" withString:@":"];
++    return [canonicalExpected caseInsensitiveCompare:canonicalActual] == NSOrderedSame;
++}
++
++static uint64_t HandoffTimeMs() {
++    return clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / NSEC_PER_MSEC;
++}
++
+ @implementation Bluetooth {
+     NSString *_macAddress;
+     uint64_t _diagnosticStamp;
+     uint64_t _lastTestStamp;
++    uint64_t _handoffPrimaryStamp;
++    BOOL _handoffSdpFresh;
++    uint64_t _handoffTicketCounter;
++    BudsOnHandoffSession *_handoff;
+     Bt_OnChannelData _onChannelData;
+     Bt_OnChannelClosed _onChannelClosed;
+     BOOL _channelClosedSignalled;
+@@ -156,11 +239,13 @@ static void ReportSdpServices(IOBluetoothDevice *device, bool fresh, Bt_OnDiagno
+         }
+     }
+ 
++    bool freshServices = false;
+     if (diagnostic) {
+         NSDate *currentServicesUpdate = [device getLastServicesUpdate];
+         bool timestampAdvanced = currentServicesUpdate != nil &&
+             (previousServicesUpdate == nil || [currentServicesUpdate compare:previousServicesUpdate] == NSOrderedDescending);
+-        ReportSdpServices(device, queryCompleted && completionStatus == kIOReturnSuccess && timestampAdvanced, diagnostic);
++        freshServices = queryCompleted && completionStatus == kIOReturnSuccess && timestampAdvanced;
++        ReportSdpServices(device, freshServices, diagnostic);
+     }
+ 
+     IOBluetoothSDPServiceRecord *serviceRecord = [device getServiceRecordForUUID:parsedUuid];
+@@ -250,6 +335,10 @@ static void ReportSdpServices(IOBluetoothDevice *device, bool fresh, Bt_OnDiagno
+                     return BT_CONN_EOPEN;
+ 
+                 _macAddress = [[NSString alloc] initWithString:mac];
++                if (memcmp(uuid, SppNewUuid, sizeof(SppNewUuid)) == 0) {
++                    _handoffPrimaryStamp = _diagnosticStamp;
++                    _handoffSdpFresh = freshServices;
++                }
+                 NSData *earlyData = _openingDiagnosticSource == tempRFCOMMChannel
+                     ? _openingDiagnosticData : nil;
+                 [self clearOpeningDiagnosticData];
+@@ -286,16 +375,24 @@ static void ReportSdpServices(IOBluetoothDevice *device, bool fresh, Bt_OnDiagno
+     // mRFCOMMChannel is also read by sendData on another thread; swap it out
+     // under the lock so in-flight sends keep a valid (closed) channel object.
+     IOBluetoothRFCOMMChannel *channel;
++    BudsOnHandoffSession *handoff;
+     @synchronized (self) {
+         if (expected && mRFCOMMChannel != expected)
+             return FALSE;
+         channel = mRFCOMMChannel;
+         mRFCOMMChannel = nil;
++        _handoffPrimaryStamp = 0;
++        _handoffSdpFresh = NO;
++        handoff = _handoff;
++        if (handoff)
++            handoff->revoked = YES;
++        _macAddress = nil;
+         _diagnosticChannel = false;
+         [self clearOpeningDiagnosticData];
+         ++_diagnosticStamp;
+     }
+ 
++    [self endHandoff:handoff];
+     if (channel != nil) {
+         // This will close the RFCOMM channel and start an inactivity timer to close the baseband connection if no
+         // other channels (L2CAP or RFCOMM) are open.
+@@ -303,8 +400,6 @@ static void ReportSdpServices(IOBluetoothDevice *device, bool fresh, Bt_OnDiagno
+         [channel closeChannel];
+     }
+ 
+-    _macAddress = NULL;
+-
+     return TRUE;
+ }
+ 
+@@ -495,6 +590,202 @@ static void ReportSdpServices(IOBluetoothDevice *device, bool fresh, Bt_OnDiagno
+     return [self sendBudsOnTestFrame:stamp data:frame->bytes.data() length:frame->length];
+ }
+ 
++// Called under the client lock. The primary is an established diagnostic SppNew
++// channel. The handle and opening stamp bind the ticket to that connection.
++- (BOOL)handoffPrimaryIsCurrent:(BudsOnHandoffSession *)session expectedMac:(NSString *)mac {
++    IOBluetoothRFCOMMChannel *primary = mRFCOMMChannel;
++    IOBluetoothDevice *device = [primary getDevice];
++    return session && !session->revoked && _handoff == session &&
++        _diagnosticChannel && !_diagnosticOpening && !_channelClosedSignalled &&
++        _handoffPrimaryStamp && _handoffPrimaryStamp == session->primaryStamp &&
++        primary == session->primary && [primary isOpen] && ![primary isIncoming] &&
++        device.isPaired && device.isConnected && device.connectionHandle != kBluetoothConnectionHandleNone &&
++        device.connectionHandle == session->handle &&
++        MatchesPeer(mac, _macAddress) && MatchesPeer(mac, device.addressString);
++}
++
++- (BOOL)handoffHasBinding:(BudsOnHandoffSession *)session {
++    IOBluetoothDevice *device = [session->primary getDevice];
++    BluetoothRFCOMMChannelID primaryID = [session->primary getChannelID];
++    return _handoffSdpFresh && primaryID && primaryID != session->serviceChannel &&
++        UniqueCachedChannel(device, SppNewUuid) == primaryID &&
++        session->serviceChannel && UniqueCachedChannel(device, SmepUuid) == session->serviceChannel;
++}
++
++// Revocation takes effect under the lock. A synchronous system call in progress
++// retains the reservation and performs cleanup on return, so a second open
++// cannot acquire an old channel while its delegate is still being detached.
++- (void)endHandoff:(BudsOnHandoffSession *)session {
++    IOBluetoothRFCOMMChannel *secondary;
++    @synchronized (self) {
++        if (!session || _handoff != session)
++            return;
++        session->revoked = YES;
++        if (session->inFlight || session->closing)
++            return;
++        session->closing = YES;
++        secondary = session->secondary;
++    }
++
++    if (secondary && secondary != session->primary && [secondary delegate] == session &&
++        [secondary getChannelID] != [session->primary getChannelID]) {
++        [secondary setDelegate:nil];
++        [secondary closeChannel];
++    }
++    @synchronized (self) {
++        if (_handoff == session)
++            _handoff = nil;
++    }
++}
++
++- (void)closeBudsOnHandoff:(uint64_t)ticket {
++    BudsOnHandoffSession *session;
++    @synchronized (self) {
++        session = _handoff;
++        if (!ticket || !session || session->ticket != ticket)
++            return;
++        session->revoked = YES;
++    }
++    [self endHandoff:session];
++}
++
++- (int)prepareBudsOnHandoff:(NSString *)expectedMac ticket:(uint64_t *)outTicket {
++    if (!outTicket)
++        return 1;
++    *outTicket = 0;
++    if ([NSThread isMainThread])
++        return 3;
++
++    IOBluetoothDevice *device;
++    BudsOnHandoffSession *session;
++    BOOL duplicate;
++    @synchronized (self) {
++        session = _handoff;
++        duplicate = session != nil;
++        if (duplicate) {
++            session->revoked = YES;
++        } else {
++            session = [BudsOnHandoffSession new];
++            session->owner = self;
++            session->primary = mRFCOMMChannel;
++            device = [session->primary getDevice];
++            session->primaryStamp = _handoffPrimaryStamp;
++            session->handle = device.connectionHandle;
++            _handoff = session;
++            if (![self handoffPrimaryIsCurrent:session expectedMac:expectedMac]) {
++                _handoff = nil;
++                return 1;
++            }
++            session->serviceChannel = UniqueCachedChannel(device, SmepUuid);
++            if (![self handoffHasBinding:session]) {
++                _handoff = nil;
++                return 2;
++            }
++            if (++_handoffTicketCounter == 0)
++                ++_handoffTicketCounter;
++            session->ticket = _handoffTicketCounter;
++            session->inFlight = YES;
++        }
++    }
++    if (duplicate) {
++        [self endHandoff:session];
++        return 4;
++    }
++
++    IOBluetoothRFCOMMChannel *channel = nil;
++    IOReturn openStatus = [device openRFCOMMChannelSync:&channel withChannelID:session->serviceChannel delegate:session];
++    // Sync open sometimes returns an error and a channel that becomes open a
++    // moment later. Observe only the exact object returned by this single call.
++    for (int poll = 0; channel && poll < 15 && ![channel isOpen]; ++poll) {
++        @synchronized (self) {
++            if (![self handoffPrimaryIsCurrent:session expectedMac:expectedMac])
++                break;
++        }
++        [NSThread sleepForTimeInterval:0.1];
++    }
++    int status;
++    @synchronized (self) {
++        session->secondary = channel;
++        session->inFlight = NO;
++        if (![self handoffPrimaryIsCurrent:session expectedMac:expectedMac])
++            status = 4;
++        else if (![self handoffHasBinding:session])
++            status = 2;
++        else if (!channel || channel == session->primary || ![channel isOpen] || [channel isIncoming] ||
++                 [channel getDevice] != device || [channel getChannelID] != session->serviceChannel ||
++                 [channel delegate] != session)
++            status = 3;
++        else {
++            session->gate.arm(session->ticket, HandoffTimeMs());
++            *outTicket = session->ticket;
++            status = 0;
++        }
++        if (status)
++            session->revoked = YES;
++    }
++    // IOBluetooth documents an extra caller-owned retain on successful open.
++    // session->secondary and this local are already strong ARC references.
++    if (openStatus == kIOReturnSuccess && channel)
++        CFRelease((__bridge CFTypeRef)channel);
++    if (status) {
++        [self endHandoff:session];
++        return status;
++    }
++
++    __weak Bluetooth *weakSelf = self;
++    uint64_t ticket = session->ticket;
++    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC),
++                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
++        [weakSelf closeBudsOnHandoff:ticket];
++    });
++    return 0;
++}
++
++- (int)requestBudsOnHandoff:(NSString *)expectedMac ticket:(uint64_t)ticket {
++    if ([NSThread isMainThread])
++        return 5;
++    BudsOnHandoffSession *session;
++    IOBluetoothRFCOMMChannel *channel;
++    auto frame = MakeBudsOnHandoffFrame();
++    int status;
++    @synchronized (self) {
++        session = _handoff;
++        if (!ticket || !session || session->ticket != ticket || session->inFlight || session->revoked)
++            return 4;
++        channel = session->secondary;
++        if (![self handoffPrimaryIsCurrent:session expectedMac:expectedMac])
++            status = 1;
++        else if (![self handoffHasBinding:session])
++            status = 2;
++        else if (!channel || channel == session->primary || ![channel isOpen] || [channel isIncoming] ||
++                 [channel getDevice] != [session->primary getDevice] ||
++                 [channel getChannelID] != session->serviceChannel || [channel delegate] != session)
++            status = 4;
++        else if ([channel getMTU] < frame.size())
++            status = 5;
++        else
++            status = session->gate.consume(ticket, HandoffTimeMs());
++        if (status == 6)
++            return status;
++        if (status == 0)
++            session->inFlight = YES;
++        else
++            session->revoked = YES;
++    }
++
++    if (status == 0) {
++        // Consumed before this call. A failed or partial local send is final.
++        // The retained secondary cannot redirect a write to a new connection.
++        status = [channel writeSync:frame.data() length:static_cast<UInt16>(frame.size())] == kIOReturnSuccess ? 0 : 5;
++        @synchronized (self) {
++            session->revoked = YES;
++            session->inFlight = NO;
++        }
++    }
++    [self endHandoff:session];
++    return status;
++}
++
+ - (void)setOnChannelData:(Bt_OnChannelData)callback {
+     _onChannelData = callback;
+ }
+diff --git a/GalaxyBudsClient.Platform.OSX/Native/src/BudsOnHandoffGate.h b/GalaxyBudsClient.Platform.OSX/Native/src/BudsOnHandoffGate.h
+new file mode 100644
+index 0000000..13ec427
+--- /dev/null
++++ b/GalaxyBudsClient.Platform.OSX/Native/src/BudsOnHandoffGate.h
+@@ -0,0 +1,38 @@
++#pragma once
++
++#include "BudsOnCallControl.h"
++
++class BudsOnHandoffGate {
++public:
++    void arm(uint64_t ticket, uint64_t nowMs) {
++        ticket_ = ticket;
++        armedAtMs_ = nowMs;
++    }
++
++    int consume(uint64_t ticket, uint64_t nowMs) {
++        if (ticket == 0 || ticket != ticket_)
++            return 4;
++
++        if (nowMs < armedAtMs_ || nowMs - armedAtMs_ >= 60000) {
++            ticket_ = 0;
++            return 4;
++        }
++        if (nowMs - armedAtMs_ < 3000)
++            return 6;
++
++        ticket_ = 0;
++        return 0;
++    }
++
++private:
++    uint64_t ticket_ = 0;
++    uint64_t armedAtMs_ = 0;
++};
++
++inline std::array<uint8_t, 9> MakeBudsOnHandoffFrame() {
++    // SM-U600 Galaxy Book trace: SMEP envelope, clear wire flag, computer class.
++    std::array<uint8_t, 9> frame{0xfc, 0x05, 0x00, 0x01, 0x71, 0x01};
++    FinishBudsOnFrame(frame);
++    frame.back() = 0xcc;
++    return frame;
++}
+diff --git a/GalaxyBudsClient.Platform.OSX/Native/src/bridge/Native.Bluetooth.mm b/GalaxyBudsClient.Platform.OSX/Native/src/bridge/Native.Bluetooth.mm
+index f4f5336..ccbd544 100644
+--- a/GalaxyBudsClient.Platform.OSX/Native/src/bridge/Native.Bluetooth.mm
++++ b/GalaxyBudsClient.Platform.OSX/Native/src/bridge/Native.Bluetooth.mm
+@@ -65,6 +65,26 @@ BT_SEND_RESULT bt_send_budson_option(BluetoothImpl *self, uint64_t stamp, uint8_
+     return [self->client sendBudsOnOption:stamp control:control value:value sibling:sibling];
+ }
+ 
++int bt_budson_handoff_prepare(BluetoothImpl *self, const char *expectedMac, uint64_t *ticket) {
++    if (!ticket)
++        return 1;
++    *ticket = 0;
++    if (!self || !self->client || !expectedMac)
++        return 1;
++    return [self->client prepareBudsOnHandoff:[NSString stringWithUTF8String:expectedMac] ticket:ticket];
++}
++
++int bt_budson_handoff_request(BluetoothImpl *self, const char *expectedMac, uint64_t ticket) {
++    if (!self || !self->client || !expectedMac)
++        return 1;
++    return [self->client requestBudsOnHandoff:[NSString stringWithUTF8String:expectedMac] ticket:ticket];
++}
++
++void bt_budson_handoff_close(BluetoothImpl *self, uint64_t ticket) {
++    if (self)
++        [self->client closeBudsOnHandoff:ticket];
++}
++
+ BT_ENUM_RESULT bt_enumerate(BluetoothImpl *self, EnumerationResult *result) {
+     return [self->client enumerate:result];
+ }
+diff --git a/GalaxyBudsClient.Platform.OSX/Unmanaged.cs b/GalaxyBudsClient.Platform.OSX/Unmanaged.cs
+index d29b55e..4971ba0 100644
+--- a/GalaxyBudsClient.Platform.OSX/Unmanaged.cs
++++ b/GalaxyBudsClient.Platform.OSX/Unmanaged.cs
+@@ -50,6 +50,18 @@ enum BT_SEND_RESULT {
+     BT_SEND_ENULL
+ };
+ 
++public enum BudsOnHandoffResult
++{
++    Success = 0,
++    TargetUnavailable = 1,
++    NoUniqueService = 2,
++    OpenFailed = 3,
++    Stale = 4,
++    WriteFailed = 5,
++    TooEarly = 6,
++    Busy = 7 // Managed connection or transmission gate.
++}
++
+ internal static class DSO
+ {
+     internal const string Name = "NativeInterop.dylib";
+@@ -89,6 +101,17 @@ internal static class Bluetooth
+     [DllImport(DSO.Name, CallingConvention = CallingConvention.Cdecl)]
+     internal static extern unsafe BT_SEND_RESULT bt_send_budson_option(
+         BluetoothImpl* self, ulong stamp, byte control, byte value, byte sibling);
++    [DllImport(DSO.Name, CallingConvention = CallingConvention.Cdecl)]
++    internal static extern unsafe BudsOnHandoffResult bt_budson_handoff_prepare(
++        BluetoothImpl* self, [MarshalAs(UnmanagedType.LPUTF8Str)] string expectedMac, out ulong ticket);
++
++    [DllImport(DSO.Name, CallingConvention = CallingConvention.Cdecl)]
++    internal static extern unsafe BudsOnHandoffResult bt_budson_handoff_request(
++        BluetoothImpl* self, [MarshalAs(UnmanagedType.LPUTF8Str)] string expectedMac, ulong ticket);
++
++    [DllImport(DSO.Name, CallingConvention = CallingConvention.Cdecl)]
++    internal static extern unsafe void bt_budson_handoff_close(BluetoothImpl* self, ulong ticket);
++
+     [DllImport(DSO.Name)]
+     internal static extern unsafe BT_ENUM_RESULT bt_enumerate(BluetoothImpl* self, ref EnumerationResult result);
+     [DllImport(DSO.Name)]
+diff --git a/GalaxyBudsClient/Interface/Pages/SettingsPage.axaml b/GalaxyBudsClient/Interface/Pages/SettingsPage.axaml
+index cf8a985..b67c4c6 100644
+--- a/GalaxyBudsClient/Interface/Pages/SettingsPage.axaml
++++ b/GalaxyBudsClient/Interface/Pages/SettingsPage.axaml
+@@ -229,6 +229,28 @@
+                 </StackPanel>
+             </ui:FASettingsExpander>
+ 
++            <ui:FASettingsExpander x:Name="BudsOnHandoffPanel" Header="Experimental audio handoff"
++                                   IsExpanded="True" IsVisible="False">
++                <StackPanel Spacing="8">
++                    <TextBlock Text="Play music on the Fold through your Buds. Preparing opens a control channel on the Mac and may interrupt that music."
++                               TextWrapping="Wrap" />
++                    <TextBlock x:Name="BudsOnHandoffAvailability"
++                               TextWrapping="Wrap" IsVisible="False" />
++                    <Button x:Name="BudsOnHandoffPrepare" Content="Prepare handoff test"
++                            Click="OnHandoffPrepare" IsEnabled="False" />
++                    <TextBlock x:Name="BudsOnHandoffStatus" TextWrapping="Wrap" IsVisible="False" />
++                    <StackPanel x:Name="BudsOnHandoffActions" Spacing="8" IsVisible="False">
++                        <Button Content="Fold audio stopped during preparation"
++                                Click="OnHandoffStopped" />
++                        <CheckBox x:Name="BudsOnHandoffConfirm" Content="I still hear Fold music through my Buds"
++                                  Click="OnHandoffConfirmed" />
++                        <Button x:Name="BudsOnHandoffRequest" Content="Request Mac audio once"
++                                Click="OnHandoffRequest" IsEnabled="False" />
++                    </StackPanel>
++                    <Button x:Name="BudsOnHandoffEnd" Content="End test" Click="OnHandoffEnd" IsVisible="False" />
++                </StackPanel>
++            </ui:FASettingsExpander>
++
+             <Button Content="Copy Buds On connection report"
+                     IsVisible="{x:Static platform:PlatformUtils.IsOSX}"
+                     Click="OnCopyBudsOnReportClicked" />
+diff --git a/GalaxyBudsClient/Interface/Pages/SettingsPage.axaml.cs b/GalaxyBudsClient/Interface/Pages/SettingsPage.axaml.cs
+index a826980..810b6dc 100644
+--- a/GalaxyBudsClient/Interface/Pages/SettingsPage.axaml.cs
++++ b/GalaxyBudsClient/Interface/Pages/SettingsPage.axaml.cs
+@@ -1,4 +1,6 @@
+ using System;
++using System.Diagnostics;
++using System.Threading;
+ using System.Threading.Tasks;
+ using Avalonia.Controls;
+ using Avalonia.Input.Platform;
+@@ -28,10 +30,22 @@ public partial class SettingsPage : BasePage<SettingsPageViewModel>
+             _budsOnSettingsTimer.Tick += (_, _) => RefreshBudsOnAudioControls();
+             AttachedToVisualTree += (_, _) =>
+             {
+-                RefreshBudsOnAudioControls();
++                var bluetooth = BluetoothImpl.Instance;
++                bluetooth.Disconnected += OnHandoffConnectionChanged;
++                bluetooth.BluetoothError += OnHandoffConnectionChanged;
++                bluetooth.Device.DeviceChanged += OnHandoffConnectionChanged;
+                 _budsOnSettingsTimer.Start();
++                RefreshBudsOnAudioControls();
++            };
++            DetachedFromVisualTree += (_, _) =>
++            {
++                _budsOnSettingsTimer.Stop();
++                var bluetooth = BluetoothImpl.Instance;
++                bluetooth.Disconnected -= OnHandoffConnectionChanged;
++                bluetooth.BluetoothError -= OnHandoffConnectionChanged;
++                bluetooth.Device.DeviceChanged -= OnHandoffConnectionChanged;
++                EndHandoff(null);
+             };
+-            DetachedFromVisualTree += (_, _) => _budsOnSettingsTimer.Stop();
+         }
+     }
+ 
+@@ -43,16 +57,19 @@ public partial class SettingsPage : BasePage<SettingsPageViewModel>
+     {
+         var bluetooth = BluetoothImpl.Instance;
+         var device = bluetooth.Device.Current;
+-        BudsOnAudioPanel.IsVisible = device?.Model == Models.BudsOn;
++        BudsOnAudioPanel.IsVisible = PlatformUtils.IsOSX && device?.Model == Models.BudsOn;
++        BudsOnHandoffPanel.IsVisible = BudsOnAudioPanel.IsVisible;
+         if (!ReferenceEquals(_budsOnAudioDevice, device))
+         {
++            EndHandoff(null);
+             _budsOnAudioDevice = device;
+             BudsOnAudioResult.IsVisible = false;
+         }
+ 
+         BudsOnReadOnlyToggle.IsChecked = bluetooth.BudsOnReadOnly;
+         var connected = device != null && bluetooth.IsBudsOnSettingsDevice(device);
+-        BudsOnRefreshButton.IsEnabled = connected && !_budsOnAudioBusy;
++        RefreshHandoffControls(connected, bluetooth.BudsOnReadOnly);
++        BudsOnRefreshButton.IsEnabled = connected && !_budsOnAudioBusy && _handoff == null;
+         RefreshBudsOnAudioButton(BudsOnGamingButton, connected ? device : null, BudsOnDiagnostics.Option.GamingMode);
+         RefreshBudsOnAudioButton(BudsOnPauseButton, connected ? device : null, BudsOnDiagnostics.Option.PauseOnRemoval);
+     }
+@@ -68,7 +85,7 @@ public partial class SettingsPage : BasePage<SettingsPageViewModel>
+             _ => "Unavailable"
+         };
+         button.CommandParameter = value.HasValue ? (bool?)!value.Value : null;
+-        button.IsEnabled = canSend && !_budsOnAudioBusy && !BluetoothImpl.Instance.BudsOnReadOnly;
++        button.IsEnabled = canSend && !_budsOnAudioBusy && _handoff == null && !BluetoothImpl.Instance.BudsOnReadOnly;
+     }
+ 
+     private void OnBudsOnReadOnlyClicked(object? sender, RoutedEventArgs e)
+@@ -99,7 +116,7 @@ public partial class SettingsPage : BasePage<SettingsPageViewModel>
+     {
+         var bluetooth = BluetoothImpl.Instance;
+         var device = bluetooth.Device.Current;
+-        if (_budsOnAudioBusy || device == null || !bluetooth.IsBudsOnSettingsDevice(device))
++        if (_budsOnAudioBusy || _handoff != null || device == null || !bluetooth.IsBudsOnSettingsDevice(device))
+             return;
+ 
+         _budsOnAudioBusy = true;
+@@ -122,6 +139,172 @@ public partial class SettingsPage : BasePage<SettingsPageViewModel>
+         }
+     }
+ 
++    private static readonly TimeSpan HandoffListenTime = TimeSpan.FromSeconds(3);
++    private static readonly TimeSpan HandoffLifetime = TimeSpan.FromSeconds(55);
++
++    private sealed class HandoffTest(Device device)
++    {
++        public Device Device { get; } = device;
++        public CancellationTokenSource? Preparing { get; set; }
++        public ulong Ticket { get; set; }
++        public long Started { get; } = Stopwatch.GetTimestamp();
++        public long Opened { get; set; }
++        public bool Requested { get; set; }
++    }
++
++    private HandoffTest? _handoff;
++
++    private void ShowHandoffStatus(string? text)
++    {
++        BudsOnHandoffStatus.Text = text;
++        BudsOnHandoffStatus.IsVisible = !string.IsNullOrEmpty(text);
++    }
++
++    private void EndHandoff(string? message)
++    {
++        var test = _handoff;
++        _handoff = null;
++        test?.Preparing?.Cancel();
++        if (test is { Ticket: > 0 })
++            BluetoothImpl.Instance.CloseBudsOnHandoff(test.Ticket);
++        BudsOnHandoffConfirm.IsChecked = false;
++        ShowHandoffStatus(message);
++    }
++
++    private void OnHandoffConnectionChanged(object? sender, object? args)
++    {
++        var test = _handoff;
++        if (test == null)
++            return;
++        Dispatcher.UIThread.Post(() =>
++        {
++            if (!ReferenceEquals(_handoff, test))
++                return;
++            EndHandoff("Test ended because the connection changed.");
++            RefreshBudsOnAudioControls();
++        });
++    }
++
++    private void RefreshHandoffControls(bool connected, bool readOnly)
++    {
++        var test = _handoff;
++        if (test != null)
++        {
++            if (!connected || readOnly || !ReferenceEquals(BluetoothImpl.Instance.Device.Current, test.Device))
++                EndHandoff("Test ended because the connection or diagnostic mode changed.");
++            else if (Stopwatch.GetElapsedTime(test.Started) >= HandoffLifetime)
++                EndHandoff("Test expired. Prepare again to retry.");
++        }
++
++        test = _handoff;
++        var open = test is { Ticket: > 0, Requested: false };
++        var listened = open && Stopwatch.GetElapsedTime(test!.Opened) >= HandoffListenTime;
++        BudsOnHandoffAvailability.Text = readOnly
++            ? "Read-only diagnostics is on. The handoff test is disabled."
++            : "Connect the Buds in GalaxyBudsClient to prepare the test.";
++        BudsOnHandoffAvailability.IsVisible = readOnly || !connected;
++        BudsOnHandoffPrepare.IsEnabled = _budsOnSettingsTimer.IsEnabled && connected &&
++                                         !readOnly && !_budsOnAudioBusy && test == null;
++        BudsOnHandoffActions.IsVisible = open;
++        BudsOnHandoffConfirm.IsEnabled = listened;
++        BudsOnHandoffRequest.IsEnabled = listened && BudsOnHandoffConfirm.IsChecked == true;
++        BudsOnHandoffEnd.IsVisible = test is { Requested: false };
++    }
++
++    private async void OnHandoffPrepare(object? sender, RoutedEventArgs e)
++    {
++        RefreshBudsOnAudioControls();
++        var bluetooth = BluetoothImpl.Instance;
++        if (!BudsOnHandoffPrepare.IsEnabled || bluetooth.Device.Current is not { } device)
++            return;
++
++        using var cancellation = new CancellationTokenSource();
++        var test = new HandoffTest(device) { Preparing = cancellation };
++        _handoff = test;
++        ShowHandoffStatus("Opening the Mac control channel…");
++        RefreshBudsOnAudioControls();
++        try
++        {
++            var (ticket, message) = await bluetooth.PrepareBudsOnHandoffAsync(device, cancellation.Token);
++            if (!ReferenceEquals(_handoff, test))
++            {
++                if (ticket != 0)
++                    bluetooth.CloseBudsOnHandoff(ticket);
++                return;
++            }
++
++            if (ticket == 0)
++                EndHandoff(message);
++            else
++            {
++                test.Opened = Stopwatch.GetTimestamp();
++                test.Ticket = ticket;
++                ShowHandoffStatus("Listen for a few seconds, then confirm whether the Fold music is still playing.");
++            }
++        }
++        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
++        {
++            // The action that ended this test already cleared its UI.
++        }
++        catch (Exception ex)
++        {
++            Serilog.Log.Warning(ex, "Buds On handoff preparation was interrupted");
++            if (ReferenceEquals(_handoff, test))
++                EndHandoff("Could not prepare the handoff test.");
++        }
++        finally
++        {
++            test.Preparing = null;
++        }
++        RefreshBudsOnAudioControls();
++    }
++
++    private void OnHandoffConfirmed(object? sender, RoutedEventArgs e) => RefreshBudsOnAudioControls();
++
++    private void OnHandoffStopped(object? sender, RoutedEventArgs e)
++    {
++        RefreshBudsOnAudioControls();
++        if (_handoff is not { Ticket: > 0, Requested: false })
++            return;
++        BudsOnDiagnostics.Record("Handoff test: user heard Fold audio stop during preparation.");
++        EndHandoff("Recorded that the Fold audio stopped during preparation. No audio request was sent.");
++        RefreshBudsOnAudioControls();
++    }
++
++    private void OnHandoffEnd(object? sender, RoutedEventArgs e)
++    {
++        EndHandoff("Test ended.");
++        RefreshBudsOnAudioControls();
++    }
++
++    private async void OnHandoffRequest(object? sender, RoutedEventArgs e)
++    {
++        RefreshBudsOnAudioControls();
++        if (!BudsOnHandoffRequest.IsEnabled || _handoff is not { Ticket: > 0, Requested: false } test)
++            return;
++
++        test.Requested = true;
++        BudsOnDiagnostics.Record("Handoff test: user confirmed Fold audio before the request.");
++        ShowHandoffStatus("Sending one Mac audio request…");
++        RefreshBudsOnAudioControls();
++        string message;
++        try
++        {
++            message = await BluetoothImpl.Instance.RequestBudsOnHandoffAsync(test.Device, test.Ticket);
++        }
++        catch (Exception ex)
++        {
++            Serilog.Log.Warning(ex, "Buds On handoff request was interrupted");
++            message = "The request was interrupted. Check where the audio is playing.";
++        }
++
++        if (ReferenceEquals(_handoff, test))
++        {
++            EndHandoff(message);
++            RefreshBudsOnAudioControls();
++        }
++    }
++
+     private void OnIsTrayIconEnabledChanged(object? sender, RoutedEventArgs e)
+     {
+         // If the tray icon is disabled, also disable auto start
+diff --git a/GalaxyBudsClient/Platform/BluetoothImpl.cs b/GalaxyBudsClient/Platform/BluetoothImpl.cs
+index 45d182f..452401d 100644
+--- a/GalaxyBudsClient/Platform/BluetoothImpl.cs
++++ b/GalaxyBudsClient/Platform/BluetoothImpl.cs
+@@ -1,6 +1,11 @@
+ using System;
+ using System.Collections.Concurrent;
+ using System.Collections.Generic;
++#if OSX
++using System.ComponentModel;
++using System.Diagnostics;
++using HandoffResult = GalaxyBudsClient.Platform.OSX.BudsOnHandoffResult;
++#endif
+ using System.Linq;
+ using System.Threading;
+ using System.Threading.Tasks;
+@@ -113,6 +118,9 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+         }
+         
+         _backend = backend;
++#if OSX
++        Device.DeviceChanged += OnHandoffDeviceChanged;
++#endif
+         _loop = Task.Run(DataConsumerLoop, _loopCancelSource.Token);
+             
+         _backend.Connecting += (_, _) =>
+@@ -150,12 +158,19 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+             return false;
+         }
+ 
++        InvalidateBudsOnHandoff();
+         AlternativeModeEnabled = altMode;
+         return true;
+     }
+ 
+     public async void Dispose()
+     {
++#if OSX
++        Device.DeviceChanged -= OnHandoffDeviceChanged;
++        lock (_handoffLock)
++            _handoffDisposed = true;
++#endif
++        InvalidateBudsOnHandoff();
+         try
+         {
+             await _backend.DisconnectAsync();
+@@ -203,6 +218,7 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+ 
+     private void OnBluetoothError(BluetoothException exception)
+     {
++        InvalidateBudsOnHandoff();
+         if (CurrentModel == Models.BudsOn)
+             BudsOnDiagnostics.ResetReceiveStream();
+         if (AlternativeModeEnabled)
+@@ -319,6 +335,7 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+ 
+     public async Task DisconnectAsync(bool alternative = false)
+     {
++        InvalidateBudsOnHandoff();
+         if (CurrentModel == Models.BudsOn)
+             BudsOnDiagnostics.ResetReceiveStream();
+         if (!alternative && AlternativeModeEnabled)
+@@ -413,7 +430,210 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+     internal bool BudsOnReadOnly
+     {
+         get => Volatile.Read(ref _budsOnReadOnly) != 0;
+-        set => Volatile.Write(ref _budsOnReadOnly, value ? 1 : 0);
++        set
++        {
++            Volatile.Write(ref _budsOnReadOnly, value ? 1 : 0);
++            if (value)
++                InvalidateBudsOnHandoff();
++        }
++    }
++
++#if OSX
++    private sealed class HandoffAttempt(Device device, long session)
++    {
++        internal readonly Device Device = device;
++        internal readonly long Session = session;
++        internal readonly string Mac = device.MacAddress;
++        internal readonly long Started = Stopwatch.GetTimestamp();
++        internal ulong Ticket;
++    }
++
++    private readonly object _handoffLock = new();
++    private HandoffAttempt? _handoffAttempt;
++    private bool _handoffDisposed;
++
++    private void OnHandoffDeviceChanged(object? sender, Device? device) => InvalidateBudsOnHandoff();
++
++    private void OnHandoffIdentityChanged(object? sender, PropertyChangedEventArgs change)
++    {
++        if (sender is not Device changed ||
++            change.PropertyName is not (null or "" or nameof(changed.MacAddress) or nameof(changed.Model)))
++            return;
++        HandoffAttempt? attempt;
++        lock (_handoffLock)
++            attempt = _handoffAttempt;
++        if (attempt != null && ReferenceEquals(attempt.Device, changed))
++            InvalidateHandoffAttempt(attempt);
++    }
++
++    private bool CanUseHandoff(HandoffAttempt attempt)
++    {
++        lock (_handoffLock)
++            return ReferenceEquals(_handoffAttempt, attempt) && !_handoffDisposed && !BudsOnReadOnly &&
++                   IsBudsOnSettingsDevice(attempt.Device) &&
++                   BudsOnDiagnostics.GetHandoffSession(attempt.Device) == attempt.Session &&
++                   string.Equals(attempt.Mac, attempt.Device.MacAddress, StringComparison.OrdinalIgnoreCase);
++    }
++
++    private static void RecordHandoff(HandoffAttempt attempt, string outcome) =>
++        BudsOnDiagnostics.Record($"Buds On handoff (+{Stopwatch.GetElapsedTime(attempt.Started).TotalSeconds:F1}s): {outcome}");
++
++    private static void RecordHandoffRoute(HandoffAttempt attempt, string stage) =>
++        RecordHandoff(attempt, $"{stage}; Mac default output = {OSX.BudsOnAudioRoute.GetDefaultOutput(attempt.Mac)}");
++
++    private static string DescribeHandoffResult(HandoffResult result) => result switch
++    {
++        HandoffResult.TargetUnavailable => "The Mac could not confirm an active Bluetooth connection to the selected paired Buds On.",
++        HandoffResult.NoUniqueService => "The Buds did not advertise one identifiable handoff channel.",
++        HandoffResult.OpenFailed => "The Mac could not open the handoff channel.",
++        HandoffResult.Stale => "The test expired or the selected connection changed. Start a new test.",
++        HandoffResult.WriteFailed => "The Mac reported a write error. Check where the audio is playing.",
++        HandoffResult.TooEarly => "The baseline interval was too short. Start a new test.",
++        HandoffResult.Busy => "A Bluetooth operation is in progress. Start a new test when it finishes.",
++        _ => "The handoff test could not complete."
++    };
++
++    private void InvalidateHandoffAttempt(HandoffAttempt? expected = null, ulong? ticket = null)
++    {
++        HandoffAttempt attempt;
++        lock (_handoffLock)
++        {
++            if (_handoffAttempt is not { } current || (expected != null && !ReferenceEquals(expected, current)) ||
++                (ticket.HasValue && current.Ticket != ticket))
++                return;
++            attempt = current;
++            _handoffAttempt = null;
++            current.Device.PropertyChanged -= OnHandoffIdentityChanged;
++        }
++        if (attempt.Ticket != 0 && _backend is OSX.BluetoothService backend)
++            backend.CloseBudsOnHandoff(attempt.Ticket);
++    }
++#endif
++
++    private void InvalidateBudsOnHandoff()
++    {
++#if OSX
++        InvalidateHandoffAttempt();
++#endif
++    }
++
++    internal void CloseBudsOnHandoff(ulong ticket)
++    {
++#if OSX
++        if (ticket != 0)
++            InvalidateHandoffAttempt(ticket: ticket);
++#endif
++    }
++
++    internal async Task<(ulong Ticket, string Message)> PrepareBudsOnHandoffAsync(Device device,
++        CancellationToken token = default)
++    {
++        if (BudsOnReadOnly)
++            return (0, "Buds On is in read-only mode.");
++#if OSX
++        if (_backend is OSX.BluetoothService backend && IsBudsOnSettingsDevice(device))
++        {
++            if (BudsOnDiagnostics.GetHandoffSession(device) is not { } session)
++                return (0, "Waiting for a recognized Buds On status on this connection. Try again once it arrives.");
++            if (Interlocked.CompareExchange(ref _budsOnOperationInProgress, 1, 0) != 0)
++                return (0, "A Buds On operation is in progress.");
++
++            ulong nativeTicket = 0;
++            var attempt = new HandoffAttempt(device, session);
++            try
++            {
++                InvalidateBudsOnHandoff();
++                lock (_handoffLock)
++                {
++                    if (_handoffDisposed || BudsOnReadOnly || !IsBudsOnSettingsDevice(device))
++                        return (0, DescribeHandoffResult(HandoffResult.TargetUnavailable));
++                    _handoffAttempt = attempt;
++                    device.PropertyChanged += OnHandoffIdentityChanged;
++                }
++
++                using var registration = token.Register(() => InvalidateHandoffAttempt(attempt));
++                var prepared = await Task.Run(() =>
++                {
++                    RecordHandoffRoute(attempt, "Before opening the handoff channel");
++                    return backend.PrepareBudsOnHandoff(attempt.Mac, () => CanUseHandoff(attempt));
++                });
++                nativeTicket = prepared.Ticket;
++                if (prepared.Result != HandoffResult.Success || nativeTicket == 0)
++                {
++                    RecordHandoff(attempt, $"Prepare result = {prepared.Result}");
++                    return (0, DescribeHandoffResult(prepared.Result));
++                }
++
++                await Task.Run(() => RecordHandoffRoute(attempt, "Handoff channel open, before request"));
++                lock (_handoffLock)
++                {
++                    if (!CanUseHandoff(attempt))
++                        return (0, DescribeHandoffResult(HandoffResult.Stale));
++                    attempt.Ticket = nativeTicket;
++                }
++                return (nativeTicket, "Handoff channel opened. Check where audio plays before sending the request.");
++            }
++            finally
++            {
++                if (attempt.Ticket == 0)
++                {
++                    if (nativeTicket != 0)
++                        backend.CloseBudsOnHandoff(nativeTicket);
++                    InvalidateHandoffAttempt(attempt);
++                }
++                Volatile.Write(ref _budsOnOperationInProgress, 0);
++            }
++        }
++#endif
++        return (0, "Connect your Buds On in the Mac app to prepare the handoff test.");
++    }
++
++    internal async Task<string> RequestBudsOnHandoffAsync(Device device, ulong ticket)
++    {
++#if OSX
++        if (_backend is OSX.BluetoothService backend && ticket != 0)
++        {
++            HandoffAttempt attempt;
++            lock (_handoffLock)
++            {
++                if (_handoffAttempt is not { } current || current.Ticket != ticket)
++                    return DescribeHandoffResult(HandoffResult.Stale);
++                attempt = current;
++            }
++            if (!ReferenceEquals(attempt.Device, device) || !CanUseHandoff(attempt))
++            {
++                CloseBudsOnHandoff(ticket);
++                return DescribeHandoffResult(HandoffResult.Stale);
++            }
++            if (Interlocked.CompareExchange(ref _budsOnOperationInProgress, 1, 0) != 0)
++            {
++                CloseBudsOnHandoff(ticket);
++                return DescribeHandoffResult(HandoffResult.Busy);
++            }
++            try
++            {
++                var result = await Task.Run(() =>
++                {
++                    RecordHandoffRoute(attempt, "Immediately before manual request");
++                    return backend.RequestBudsOnHandoff(attempt.Mac, ticket, () => CanUseHandoff(attempt));
++                });
++                RecordHandoff(attempt, $"Local request result = {result}");
++                if (result != HandoffResult.Success)
++                    return DescribeHandoffResult(result);
++
++                await Task.Run(() => RecordHandoffRoute(attempt, "After locally accepted request"));
++                return CanUseHandoff(attempt)
++                    ? "The Mac sent one request. Play audio on the Mac and check what you hear through the Buds and whether the Fold still shows them connected."
++                    : "The Mac sent one request and the connection changed. Check the Mac audio and the Fold’s connection.";
++            }
++            finally
++            {
++                CloseBudsOnHandoff(ticket);
++                Volatile.Write(ref _budsOnOperationInProgress, 0);
++            }
++        }
++#endif
++        return "Prepare the handoff test on your connected Buds On first.";
+     }
+ 
+     internal async Task<string?> RefreshBudsOnStatusAsync(Device device)
+@@ -725,6 +945,7 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+     
+     private void OnDisconnected(object? sender, string reason)
+     {
++        InvalidateBudsOnHandoff();
+         if (CurrentModel == Models.BudsOn)
+             BudsOnDiagnostics.ResetReceiveStream();
+         if (AlternativeModeEnabled)
+diff --git a/GalaxyBudsClient/Platform/BudsOnDiagnostics.cs b/GalaxyBudsClient/Platform/BudsOnDiagnostics.cs
+index 3ca803f..cb85772 100644
+--- a/GalaxyBudsClient/Platform/BudsOnDiagnostics.cs
++++ b/GalaxyBudsClient/Platform/BudsOnDiagnostics.cs
+@@ -297,6 +297,14 @@ internal static class BudsOnDiagnostics
+         }
+     }
+ 
++    // The registered model can be chosen manually. Require its observed status layout on this connection.
++    internal static long? GetHandoffSession(Device device)
++    {
++        lock (Sync)
++            return ReferenceEquals(_receiveDevice, device) && _receiveStamp != 0 && FrameProbe.LatestControlStatus != null
++                ? _receiveSession : null;
++    }
++
+     public static bool HasLiveBudsOnStatus(Device device) => HasFreshStatus(device);
+ 
+     public static bool HasFreshStatus(Device device)
