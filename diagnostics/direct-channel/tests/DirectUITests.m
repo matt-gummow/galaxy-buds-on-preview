@@ -86,7 +86,7 @@ static void TestHostSetup(void) {
     TestController *closed = mock();
     closed.hostSetup = YES;
     [closed transportStage:@"opened" detail:@"Opened"];
-    [closed windowWillClose:nil];
+    [closed windowWillClose:[NSNotification notificationWithName:NSWindowWillCloseNotification object:nil]];
     [closed transportStage:@"sent" detail:@"Late callback"];
     assert(closed.ended && !closed.sent && ![[closed reportText] containsString:@"Late callback"]);
     TestController *listen = mock();
