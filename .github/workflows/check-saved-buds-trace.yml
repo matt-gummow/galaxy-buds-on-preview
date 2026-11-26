@@ -1,0 +1,26 @@
+name: Windows saved Bluetooth trace reader
+on:
+  push:
+    branches:
+      - diagnostics/buds-on-control-trace
+      - main
+    paths:
+      - 'tools/buds-on-trace/**'
+      - '.github/workflows/check-saved-buds-trace.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test-and-package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile using Windows PowerShell and test captured-message classification
+        shell: powershell
+        run: |
+          .\tools\buds-on-trace\tests\check.ps1 -OutputFolder (Join-Path $env:RUNNER_TEMP 'buds-trace-kit')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Buds-On-Control-Trace-Reader
+          path: ${{ runner.temp }}/buds-trace-kit/
+          if-no-files-found: error
