@@ -33,7 +33,7 @@ SM-U600 disables the generic multipoint capability in Samsung’s app profile. T
 
 Analysis used Samsung’s [Galaxy Buds 9.0.10.1724 APK](https://www.apkmirror.com/apk/samsung-electronics-co-ltd/galaxy-buds/galaxy-buds-9-0-10-1724-release/galaxy-buds-9-0-10-1724-android-apk-download/#safeDownload) and the pinned GalaxyBudsClient source. Offsets below refer to the payload and start at zero.
 
-- Validated `0x61` frames are 63 bytes. The EQ preset is byte 9. Byte 10 includes Answer/end call in bit 4, Decline in bit 5, and Media controls in bits 3, 2, 1, and 6. The `0x90` command preserves unrelated flags.
+- Validated `0x61` frames have 63-byte payloads. The EQ preset is byte 9. Byte 10 includes Answer/end call in bit 4, Decline in bit 5, and Media controls in bits 3, 2, 1, and 6. The `0x90` command preserves unrelated flags.
 - Standard EQ is set with `0x86` and a preset code from 0 to 5. The `0x69` read request accepts a validated six- or seven-row, nine-band reply and displays the last row as Custom.
 - The high and low nibbles of byte 11 hold the left and right hold options. The `0x92` command uses both sides, with 0 for Off and 6 for Volume. Other options and assistant subtype writes are disabled.
 - The two experimental audio options use `0x85` for Gaming mode (status byte 8) and `0x6C` for Pause when one earbud is removed (status byte 46). Both are binary.
