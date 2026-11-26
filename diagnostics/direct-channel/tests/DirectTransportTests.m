@@ -5,6 +5,7 @@
 - (id)clientSettings;
 - (NSArray *)pairedDevices;
 - (void)checkTimeout;
+- (void)checkWriteTimeout;
 @end
 
 @interface Element : NSObject
@@ -47,12 +48,24 @@
 @property BOOL isOpen;
 @property BOOL isIncoming;
 @property unsigned closes;
+@property UInt16 mtu;
+@property IOReturn queueStatus;
+@property unsigned writes;
+@property void *token;
+@property(strong) NSData *frame;
 @end
 @implementation Channel
 - (id)delegate { return self.receiver; }
 - (IOReturn)setDelegate:(id)delegate { self.receiver = delegate; return kIOReturnSuccess; }
 - (id)getDevice { return self.peer; }
 - (BluetoothRFCOMMChannelID)getChannelID { return 7; }
+- (UInt16)getMTU { return self.mtu; }
+- (IOReturn)writeAsync:(void *)buffer length:(UInt16)length refcon:(void *)refcon {
+    ++_writes;
+    self.frame = [NSData dataWithBytes:buffer length:length];
+    self.token = refcon;
+    return self.queueStatus;
+}
 - (IOReturn)closeChannel { ++_closes; self.isOpen = NO; return kIOReturnSuccess; }
 @end
 
@@ -90,6 +103,7 @@ static Peer *PairedBuds(void) {
     peer.lookup = selected;
     peer.services = @[selected];
     peer.channel = [Channel new];
+    peer.channel.mtu = 127;
     peer.channel.peer = peer;
     peer.synchronous = YES;
     return peer;
@@ -121,6 +135,10 @@ static Peer *PairedBuds(void) {
         [steps addObject:stage];
     }];
 }
+- (void)beginSetup {
+    NSMutableArray *steps = self.steps;
+    [self startBookHostSetup:^(NSString *stage, NSString *detail) { [steps addObject:stage]; }];
+}
 @end
 
 static void Drain(void) {
@@ -141,6 +159,8 @@ static void ExpectOpen(Rig *rig) {
     Drain();
     NSCAssert(([rig.steps isEqual:@[@"opening", @"opened"]]), @"Expected one confirmed channel open");
     [rig stop];
+    for (Peer *peer in rig.paired)
+        NSCAssert(!peer.channel.writes, @"The connection check never sends setup");
 }
 
 static void TestDuplicatePairedRows(void) {
@@ -183,8 +203,101 @@ static void TestDuplicatePairedRows(void) {
     }
 }
 
+static void MarkSamsungService(Peer *peer) {
+    uuid_t value;
+    [[[NSUUID alloc] initWithUUIDString:@"F8620674-A1ED-41AB-A8B9-DE9AD655729D"] getUUIDBytes:value];
+    Element *entry = [Element new], *list = [Element new];
+    entry.uuid = [IOBluetoothSDPUUID uuidWithBytes:value length:sizeof(value)];
+    list.children = @[entry];
+    peer.lookup.classes = list;
+}
+
+static void TestBookHostSetup(void) {
+    // Independently construct the two public reference implementations’ v3
+    // setup: message ID + command + extended body, little-endian CRC/XMODEM.
+    const uint8_t body[] = {1, 0x43, 4, 3, 7, 0, 0, 0x0b, 3, 0, 0, 0};
+    uint16_t crc = 0;
+    for (size_t i = 0; i < sizeof(body); ++i) {
+        crc ^= (uint16_t)body[i] << 8;
+        for (int bit = 0; bit < 8; ++bit)
+            crc = (uint16_t)((crc << 1) ^ ((crc & 0x8000) ? 0x1021 : 0));
+    }
+    uint8_t header[] = {0xfc, sizeof(body) + 2, 0};
+    uint8_t trailer[] = {(uint8_t)crc, (uint8_t)(crc >> 8), 0xcc};
+    NSMutableData *expected = [NSMutableData dataWithBytes:header length:sizeof(header)];
+    [expected appendBytes:body length:sizeof(body)];
+    [expected appendBytes:trailer length:sizeof(trailer)];
+
+    Rig *rig = [Rig new];
+    Peer *verified = PairedBuds();
+    MarkSamsungService(verified);
+    rig.paired = @[rig.peer, verified];
+    [rig beginSetup]; Drain();
+    Channel *channel = verified.channel;
+    NSCAssert(!rig.peer.opens && !rig.peer.channel.writes && channel.writes == 1 &&
+              [channel.frame isEqual:expected], @"Use the verified alias and send only the reference frame");
+    NSCAssert(([rig.steps isEqual:@[@"opening", @"opened"]]), @"Queueing alone is not a confirmed write");
+    [channel.receiver rfcommChannelOpenComplete:(id)channel status:kIOReturnSuccess];
+    [channel.receiver rfcommChannelWriteComplete:(id)channel refcon:NULL status:kIOReturnSuccess];
+    Drain();
+    NSCAssert(channel.writes == 1 && [rig.steps.lastObject isEqual:@"opened"], @"Ignore duplicate open or unrelated write");
+    [channel.receiver rfcommChannelWriteComplete:(id)channel refcon:channel.token status:kIOReturnSuccess];
+    Drain();
+    NSCAssert(([rig.steps isEqual:@[@"opening", @"opened", @"sent"]] && channel.closes == 1),
+              @"Confirm the local write once and close its channel");
+    [rig beginSetup]; Drain();
+    NSCAssert(channel.writes == 1 && verified.opens == 1, @"Never retry the setup");
+
+    rig = [Rig new]; [rig beginSetup]; Drain();
+    NSCAssert([rig.steps.lastObject isEqual:@"failed"] && !rig.peer.channel.writes,
+              @"A receive-only service match cannot authorize a write");
+
+    rig = [Rig new]; MarkSamsungService(rig.peer);
+    rig.peer.synchronous = NO; [rig beginSetup];
+    rig.peer.lookup.classes = nil;
+    rig.peer.channel.isOpen = YES;
+    [rig.peer.channel.receiver rfcommChannelOpenComplete:(id)rig.peer.channel status:kIOReturnSuccess];
+    Drain();
+    NSCAssert([rig.steps.lastObject isEqual:@"failed"] && !rig.peer.channel.writes,
+              @"Verify the service class again on the opened channel");
+
+    rig = [Rig new]; MarkSamsungService(rig.peer);
+    rig.peer.channel.mtu = (UInt16)expected.length - 1; [rig beginSetup]; Drain();
+    NSCAssert([rig.steps.lastObject isEqual:@"failed"] && !rig.peer.channel.writes,
+              @"A short MTU must not cause a partial write");
+
+    rig = [Rig new]; MarkSamsungService(rig.peer);
+    rig.peer.channel.queueStatus = kIOReturnError; [rig beginSetup]; Drain();
+    NSCAssert([rig.steps.lastObject isEqual:@"failed"] && rig.peer.channel.writes == 1,
+              @"A local queue error is terminal");
+
+    rig = [Rig new]; MarkSamsungService(rig.peer); [rig beginSetup]; Drain();
+    channel = rig.peer.channel;
+    [channel.receiver rfcommChannelWriteComplete:(id)channel refcon:channel.token status:kIOReturnSuccess
+                                     bytesWritten:expected.length - 1];
+    Drain();
+    NSCAssert([rig.steps.lastObject isEqual:@"failed"] && channel.writes == 1, @"A partial completion is inconclusive");
+
+    rig = [Rig new]; MarkSamsungService(rig.peer); [rig beginSetup]; Drain();
+    channel = rig.peer.channel;
+    [rig checkWriteTimeout];
+    [(id<IOBluetoothRFCOMMChannelDelegate>)rig rfcommChannelWriteComplete:(id)channel refcon:channel.token status:kIOReturnSuccess];
+    Drain();
+    NSCAssert([rig.steps.lastObject isEqual:@"timeout"] && channel.writes == 1 && channel.closes == 1,
+              @"A timeout must suppress late completion and never cause another write");
+
+    rig = [Rig new]; MarkSamsungService(rig.peer);
+    __weak Rig *cancelled = rig;
+    [rig startBookHostSetup:^(NSString *stage, NSString *detail) {
+        if ([stage isEqual:@"opened"]) [cancelled stop];
+    }];
+    Drain();
+    NSCAssert(!rig.peer.channel.writes && rig.peer.channel.closes == 1, @"A cancelled open must never write");
+}
+
 int main(void) { @autoreleasepool {
     TestDuplicatePairedRows();
+    TestBookHostSetup();
     Rig *rig = [Rig new];
     NSCAssert(![rig preflight] && !rig.peer.opens, @"Preflight must be passive");
     [rig begin]; Drain();

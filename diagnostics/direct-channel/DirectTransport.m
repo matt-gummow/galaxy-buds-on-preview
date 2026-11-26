@@ -3,6 +3,14 @@
 
 typedef void (^ProbeEvent)(NSString *, NSString *);
 
+// Galaxy Book extended v3 host setup, including the clear wire flag and
+// little-endian CRC16/XMODEM over the message ID, command and payload.
+// Static storage remains valid until any pending IOBluetooth write completes.
+static const UInt8 BookHostSetup[] = {
+    0xfc, 0x0e, 0x00, 0x01, 0x43, 0x04, 0x03, 0x07, 0x00,
+    0x00, 0x0b, 0x03, 0x00, 0x00, 0x00, 0x10, 0x0f, 0xcc
+};
+
 static NSString *PeerKey(id value) {
     if (![value isKindOfClass:NSString.class] || [value length] != 17) return nil;
     NSString *address = [value uppercaseString];
@@ -42,8 +50,10 @@ static BOOL SameRecord(IOBluetoothSDPServiceRecord *a, IOBluetoothSDPServiceReco
            [b getServiceRecordHandle:&second] == kIOReturnSuccess && first && first == second;
 }
 
-static NSString *FindCachedChannel(IOBluetoothDevice *device, BluetoothRFCOMMChannelID *number, BOOL *missing) {
+static NSString *FindCachedChannel(IOBluetoothDevice *device, BluetoothRFCOMMChannelID *number,
+                                   BOOL *missing, BOOL *hasVendorClass) {
     *missing = NO;
+    *hasVendorClass = NO;
     const UInt8 bytes[] = {0xf8, 0x62, 0x06, 0x74, 0xa1, 0xed, 0x41, 0xab,
                            0xa8, 0xb9, 0xde, 0x9a, 0xd6, 0x55, 0x72, 0x9d};
     IOBluetoothSDPUUID *uuid = [IOBluetoothSDPUUID uuidWithBytes:bytes length:sizeof(bytes)];
@@ -88,6 +98,7 @@ static NSString *FindCachedChannel(IOBluetoothDevice *device, BluetoothRFCOMMCha
         if ([value isEqualToUUID:uuid]) contains = YES;
     }
     if (hasDecodedClass && !contains) return @"The cached service classes contradict the Samsung control UUID lookup.";
+    *hasVendorClass = contains;
     *number = selected;
     return nil;
 }
@@ -105,6 +116,8 @@ static NSString *FindCachedChannel(IOBluetoothDevice *device, BluetoothRFCOMMCha
     BOOL _opened;
     BOOL _awaitingCompletion;
     BOOL _closeRequested;
+    BOOL _bookHostSetup;
+    BOOL _awaitingWrite;
 }
 
 // These two read-only inputs are overridden by the transport fixtures.
@@ -117,32 +130,41 @@ static NSString *FindCachedChannel(IOBluetoothDevice *device, BluetoothRFCOMMCha
 
 - (NSArray *)pairedDevices { return [IOBluetoothDevice pairedDevices]; }
 
-- (NSString *)resolve {
-    _peer = nil;
-    _number = 0;
-    _key = SelectedPeerKey([self clientSettings]);
-    if (!_key) return @"The client settings do not identify one selected Galaxy Buds On.";
+- (NSString *)resolveKey:(NSString *)key peer:(IOBluetoothDevice **)peer number:(BluetoothRFCOMMChannelID *)selected {
+    *peer = nil;
+    *selected = 0;
+    if (!key) return @"The client settings do not identify one selected Galaxy Buds On.";
     NSString *unavailable = @"The selected Buds On are absent from the Mac’s paired-device list. Check Bluetooth access for this diagnostic.";
+    BOOL selectedHasVendorClass = NO;
     for (IOBluetoothDevice *device in [self pairedDevices]) {
-        if (![_key isEqual:PeerKey(device.addressString)]) continue;
+        if (![key isEqual:PeerKey(device.addressString)]) continue;
 
         // macOS may list the same address more than once, with different cached services.
         BluetoothRFCOMMChannelID number = 0;
-        BOOL missing;
-        NSString *reason = FindCachedChannel(device, &number, &missing);
+        BOOL missing, hasVendorClass;
+        NSString *reason = FindCachedChannel(device, &number, &missing, &hasVendorClass);
         if (missing) {
             unavailable = reason;
             continue;
         }
         if (reason) return reason;
-        if (_peer && _number != number)
+        if (*peer && *selected != number)
             return @"Cached records for the same Buds On disagree about Samsung’s control channel.";
-        if (!_peer) {
-            _peer = device;
-            _number = number;
+        if (!*peer || (_bookHostSetup && hasVendorClass && !selectedHasVendorClass)) {
+            *peer = device;
+            *selected = number;
+            selectedHasVendorClass = hasVendorClass;
         }
     }
-    return _peer ? nil : unavailable;
+    return *peer ? nil : unavailable;
+}
+
+- (NSString *)resolve {
+    _key = SelectedPeerKey([self clientSettings]);
+    IOBluetoothDevice *device = nil;
+    NSString *reason = [self resolveKey:_key peer:&device number:&_number];
+    _peer = device;
+    return reason;
 }
 
 - (NSString *)preflight {
@@ -167,6 +189,7 @@ static NSString *FindCachedChannel(IOBluetoothDevice *device, BluetoothRFCOMMCha
 - (void)stop {
     NSAssert(NSThread.isMainThread, @"Call on main thread");
     _event = nil;
+    _awaitingWrite = NO;
     if (!_closeRequested && [self ownsChannel:_channel]) {
         _closeRequested = YES;
         [_channel closeChannel];
@@ -186,10 +209,24 @@ static NSString *FindCachedChannel(IOBluetoothDevice *device, BluetoothRFCOMMCha
     }
 }
 
+- (void)checkWriteTimeout {
+    if (_event && _awaitingWrite)
+        [self finish:@"timeout" detail:@"macOS did not confirm the setup write before the deadline. Its delivery is unknown."];
+}
+
 - (void)start:(ProbeEvent)event {
+    [self startWithBookHostSetup:NO event:event];
+}
+
+- (void)startBookHostSetup:(ProbeEvent)event {
+    [self startWithBookHostSetup:YES event:event];
+}
+
+- (void)startWithBookHostSetup:(BOOL)hostSetup event:(ProbeEvent)event {
     NSAssert(NSThread.isMainThread, @"Call on main thread");
     if (_started) { event(@"failed", @"This diagnostic has already run."); return; }
     _started = YES;
+    _bookHostSetup = hostSetup;
     NSString *reason = [self resolve];
     if (reason) { event(@"failed", reason); return; }
     _event = [event copy];
@@ -216,6 +253,58 @@ static NSString *FindCachedChannel(IOBluetoothDevice *device, BluetoothRFCOMMCha
 // has supplied its channel object. Incoming data is intentionally discarded.
 - (void)rfcommChannelData:(IOBluetoothRFCOMMChannel *)channel data:(void *)bytes length:(size_t)length {}
 
+- (void)sendBookHostSetup:(IOBluetoothRFCOMMChannel *)channel {
+    if (!_event) return; // The listener can cancel while handling the open event.
+    IOBluetoothDevice *current = nil;
+    BluetoothRFCOMMChannelID selected = 0, actual = 0;
+    BOOL missing = NO, hasVendorClass = NO;
+    NSString *key = SelectedPeerKey([self clientSettings]);
+    NSString *reason = [self resolveKey:key peer:&current number:&selected];
+    if (reason || ![_key isEqual:key] || !current || selected != _number ||
+        ![self ownsChannel:channel] || !channel.isOpen) {
+        [self finish:@"failed" detail:reason ?: @"The selected Buds or control channel changed before setup."];
+        return;
+    }
+    reason = FindCachedChannel([channel getDevice], &actual, &missing, &hasVendorClass);
+    if (reason || !hasVendorClass || actual != _number) {
+        [self finish:@"failed" detail:reason ?: @"Host setup requires Samsung’s control service class on the open channel."];
+        return;
+    }
+    if ([channel getMTU] < sizeof(BookHostSetup)) {
+        [self finish:@"failed" detail:@"The complete host setup does not fit in one channel write."];
+        return;
+    }
+    // Only the first successful opening callback reaches here. No retries,
+    // including after a timeout or an inconclusive completion.
+    _awaitingWrite = YES;
+    IOReturn status = [channel writeAsync:(void *)BookHostSetup length:sizeof(BookHostSetup) refcon:(__bridge void *)self];
+    if (status != kIOReturnSuccess) {
+        [self finish:@"failed" detail:[NSString stringWithFormat:@"macOS could not queue the setup write (0x%08x).", (unsigned)status]];
+        return;
+    }
+    __weak DirectTransport *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        [weakSelf checkWriteTimeout];
+    });
+}
+
+- (void)rfcommChannelWriteComplete:(IOBluetoothRFCOMMChannel *)channel refcon:(void *)refcon status:(IOReturn)status {
+    // The original delegate callback supplies only the I/O status.
+    [self rfcommChannelWriteComplete:channel refcon:refcon status:status bytesWritten:sizeof(BookHostSetup)];
+}
+
+- (void)rfcommChannelWriteComplete:(IOBluetoothRFCOMMChannel *)channel refcon:(void *)refcon
+                            status:(IOReturn)status bytesWritten:(size_t)length {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (channel != self->_channel || refcon != (__bridge void *)self || !self->_awaitingWrite) return;
+        if (status != kIOReturnSuccess || length != sizeof(BookHostSetup)) {
+            [self finish:@"failed" detail:@"macOS did not confirm the full setup write. Its delivery is unknown."];
+            return;
+        }
+        [self finish:@"sent" detail:@"macOS completed the Galaxy Book host setup write. Earbud acceptance is unconfirmed."];
+    });
+}
+
 - (void)rfcommChannelOpenComplete:(IOBluetoothRFCOMMChannel *)channel status:(IOReturn)status {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (channel != self->_channel || !self->_awaitingCompletion) return;
@@ -230,7 +319,9 @@ static NSString *FindCachedChannel(IOBluetoothDevice *device, BluetoothRFCOMMCha
             return;
         }
         self->_opened = YES;
-        self->_event(@"opened", @"The selected outgoing channel opened. No application data was sent.");
+        self->_event(@"opened", self->_bookHostSetup ? @"The selected outgoing channel opened." :
+                     @"The selected outgoing channel opened. No application data was sent.");
+        if (self->_bookHostSetup) [self sendBookHostSetup:channel];
     });
 }
 
@@ -246,7 +337,8 @@ static NSString *FindCachedChannel(IOBluetoothDevice *device, BluetoothRFCOMMCha
             return;
         }
         [self releaseChannel];
-        [self finish:@"closed" detail:@"The control channel closed."];
+        [self finish:@"closed" detail:self->_awaitingWrite ? @"The channel closed before macOS confirmed the setup write." :
+                     @"The control channel closed."];
     });
 }
 

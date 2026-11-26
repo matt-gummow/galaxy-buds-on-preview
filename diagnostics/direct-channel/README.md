@@ -1,17 +1,19 @@
-# Buds On direct control-channel check
+# Buds On Connection Check
 
-This Apple Silicon diagnostic tests whether a direct open of the cached Samsung SMEP service can coexist with audible Fold playback. The GalaxyBudsClient preview currently requires an established management connection before its handoff test. That connection interrupted Fold playback in the user's test, so the handoff request was never reached.
+This Apple Silicon app offers two experiments for Galaxy Buds On (SM-U600). Quit Galaxy Buds Manager from its menu bar icon first. Connection Check uses the Buds already selected in Manager and paired with macOS. The app may request Bluetooth permission.
 
-Quit Galaxy Buds Manager, including its menu bar process. With the Buds connected to the Fold and Fold music audible, launch this app and choose **Test while Fold music is playing**. Select the playback result and copy its report. A Bluetooth permission prompt may appear on first use. Each launch makes at most one opening attempt. Opening the channel may itself cause macOS to connect the audio profiles.
+## Galaxy Book host setup
 
-The diagnostic reads GalaxyBudsClient's existing selected-device settings. It matches that Buds On to Apple's paired-device list and checks cached service records for the Samsung SMEP UUID. Missing or ambiguous records produce an explanation. An asynchronous open has a 12-second deadline. An opened channel is observed for at most 15 seconds. The app closes its own channel on a listener result, timeout, window close or quit.
+On the Mac, connect the Buds and confirm you can hear Mac audio. Select **Mac host setup**, click **Set up this Mac…**, then choose **Send once**. The app uses Samsung’s control channel to send the extended version 3 host-setup message from the Galaxy Book recording. A completed write reports what macOS submitted. The Buds' response format for confirming the stored version remains unverified.
 
-No earbud application payload is sent. The transport contains no settings, firmware, handoff, factory reset, SDP-query or explicit baseband-connection calls. Apple may establish the baseband implicitly when opening RFCOMM. The report contains fixed stage messages, relative times and the listener's observation. It excludes Bluetooth addresses, names, account fields and received packets.
+After the write, leave the Mac connected and the Buds out of the case. Reconnect the Fold once using its saved Bluetooth pairing. Play music on the Fold and check whether the Mac still lists the Buds as connected. Check whether Mac music is audible again without selecting Connect on either device. If both hosts retain the Buds, try a Fold call while Mac music is playing and listen for Mac music to resume after hanging up. Copy the app report and record which audio you heard and whether either device needed a manual reconnection.
 
-A successful open with continuing Fold audio would establish a usable control connection for the next protocol investigation. It would not establish two simultaneous audio profiles, call priority, or successful MDE configuration.
+Revision 3 of the [saved capture reader](https://github.com/matt-gummow/galaxy-buds-on-preview/commit/cc0fa1c0554a8949bdb0cd5463e9921d291ef66e) identified one exact match to the [extended v3 message](https://github.com/Clascheurduturfu/galaxy-continuity-mac/blob/13f0a528aaa28481460578a22853c08363d244f6/Sources/ContinuityCore/BudsProtocol.swift). The optional fields contained zeros. The Book also sent other messages during this connection. This experiment isolates host setup from the later computer handoff request.
+
+## Fold playback check
+
+With Fold music playing through the Buds and the Mac initially disconnected, choose **Test while Fold music is playing**. The Mac opens the control channel without sending an application payload. Select the playback result and copy the report. Each launch allows one experiment. The listener timestamp marks when the result was selected.
 
 ## Build and checks
 
-Run `bash tests/run-tests.sh`, `bash tests/run-ui-tests.sh`, and `bash build.sh /tmp/budson-connection-build` on macOS. The repository workflow builds and verifies the installer in GitHub Actions. Transport fixtures substitute every paired-device and channel input, exercising ambiguous records, synchronous and late callbacks, cancellation, remote closure and timeout. UI fixtures cover listener results while an open is pending, the observation delay, late callbacks, and automatic closure.
-
-The installer is ad-hoc signed and is not notarized.
+On macOS, run `bash tests/run-tests.sh`, `bash tests/run-ui-tests.sh`, and `bash build.sh /tmp/budson-connection-build`. GitHub Actions runs both fixture suites, builds the installer and verifies the architecture of the packaged executable. The app is ad-hoc signed. The installer is not notarized.

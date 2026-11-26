@@ -6,6 +6,8 @@ NS_ASSUME_NONNULL_BEGIN
 @interface DirectTransport : NSObject
 - (nullable NSString *)preflight;
 - (void)start:(void (^)(NSString *stage, NSString *detail))event;
+/// Explicit one-shot setup. "sent" reports local transport completion only.
+- (void)startBookHostSetup:(void (^)(NSString *stage, NSString *detail))event;
 - (void)stop;
 @end
 

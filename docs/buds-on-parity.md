@@ -31,7 +31,9 @@ The saved status decoder locates a Seamless boolean ten bytes after EQ. Four pre
 
 The Galaxy Book/Fold test demonstrated call switching and music returning. The ordinary Mac/Fold test showed both Fold audio profiles disconnecting after the Mac connection. The Book sent an extended MDE message and a later computer handoff request. The version-only Pro write and its readback have not been validated on SM-U600.
 
-The direct-channel diagnostic removes the preview's requirement for an existing management connection. Its first hardware result will distinguish whether an identified SMEP control channel can stay open while Fold music continues. Further implementation still requires validating the SM-U600 MDE message, its reply and the seamless setting before enabling the Pro-equivalent sequence.
+In Connection Check 1.1 the Mac opened the Samsung control channel with Fold music initially audible. No application payload was sent, and the listener reported that the music stopped. This test recorded neither the Fold's profile state nor the exact moment playback stopped.
+
+The revision 3 saved-trace reader matched one outgoing Galaxy Book frame on the confirmed Samsung SMEP service to the extended v3 MDE host-setup format with three zero optional bytes. In that interval the Book also sent computer settings information before setup and a separate handoff request afterward. The notification following setup has no validated version readback. Connection Check 1.2 can send the matched v3 message alone in an opt-in Mac experiment, then the listener can reconnect the Fold and check audio on both devices. A successful local Bluetooth write establishes only submission. Whether this one message is sufficient for two-host audio or call switching on SM-U600 still requires hardware observation.
 
 Battery, standard EQ, media/call touch controls and experimental gaming/pause paths already have dedicated implementations. Generic feature flags for other Pro capabilities need a model-specific audit. Firmware flashing stays disabled under the project requirements.
 
