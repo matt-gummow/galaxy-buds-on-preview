@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- BTHPORT provider settings derived from Microsoft's BluetoothStack.wprp, MIT license adjacent. -->
+<WindowsPerformanceRecorder Version="1.0" Author="Galaxy Buds On preview">
+  <Profiles>
+    <EventCollector Id="BudsPortCollector" Name="BudsOnOverlapHci">
+      <BufferSize Value="256"/>
+      <Buffers Value="32"/>
+    </EventCollector>
+    <EventProvider Id="BthPort" Name="8a1f9517-3a8c-4a9e-a018-4f17a200f277" Level="4" NonPagedMemory="true">
+      <Keywords><Keyword Value="0x0"/></Keywords>
+    </EventProvider>
+    <Profile Id="BookController.Verbose.File" Name="BookController" DetailLevel="Verbose" LoggingMode="File" Description="Book Bluetooth controller events">
+      <Collectors>
+        <EventCollectorId Value="BudsPortCollector">
+          <EventProviders><EventProviderId Value="BthPort"/></EventProviders>
+        </EventCollectorId>
+      </Collectors>
+    </Profile>
+  </Profiles>
+</WindowsPerformanceRecorder>

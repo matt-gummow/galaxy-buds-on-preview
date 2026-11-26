@@ -1,0 +1,44 @@
+name: Windows synchronized Galaxy Buds switch test
+on:
+  push:
+    branches: [diagnostics/buds-on-control-trace]
+    paths:
+      - 'tools/buds-on-overlap/**'
+      - '.github/workflows/check-buds-on-overlap.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and sign optional Android profile reader
+        shell: powershell
+        run: |
+          $root = 'tools/buds-on-overlap'
+          & "$root/build/Build-FoldFallback.ps1" -OutputApk (Join-Path (Resolve-Path $root).Path 'BudsOverlap.apk')
+      - name: Run Windows PowerShell 5.1 tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $scripts = Get-ChildItem 'tools/buds-on-overlap/tests/Test-*.ps1' | Sort-Object Name
+          if ($scripts.Count -lt 6) { throw 'One or more component tests are missing.' }
+          foreach ($script in $scripts) {
+            & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $script.FullName
+            if ($LASTEXITCODE -ne 0) { throw ('Failed: ' + $script.Name) }
+          }
+      - name: Stage the double-click kit
+        shell: powershell
+        run: |
+          $destination = Join-Path $env:RUNNER_TEMP 'Buds-On-Overlap'
+          New-Item -ItemType Directory -Path $destination | Out-Null
+          Get-ChildItem -File -Path 'tools/buds-on-overlap' | Copy-Item -Destination $destination
+          foreach ($name in 'Start-Buds-Overlap.cmd','Capture-Overlap.ps1','BudsOverlap.apk') {
+            if (!(Test-Path -LiteralPath (Join-Path $destination $name))) { throw "Missing $name" }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Buds-On-Overlap
+          path: ${{ runner.temp }}/Buds-On-Overlap/
+          if-no-files-found: error
