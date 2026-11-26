@@ -19,8 +19,6 @@ jobs:
     name: Build Apple Silicon .pkg
     runs-on: xcode-27
     timeout-minutes: 90
-    env:
-      NUGET_PACKAGES: ${{ runner.temp }}/budson-nuget
     steps:
       - name: Checkout diagnostic patch
         uses: actions/checkout@v7
@@ -57,6 +55,7 @@ jobs:
           xcodebuild -version
           dotnet --version
           uname -m
+          printf 'NUGET_PACKAGES=%s/budson-nuget\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Apply Buds On preview patch
         shell: bash
