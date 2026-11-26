@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Read-only Buds On recognition and Bluetooth connection diagnostics.
+"""Buds On recognition, diagnostics and a one-shot call control test.
 
 Usage: python3 add_buds_on.py /path/to/GalaxyBudsClient
 Targets upstream commit 85dfc8bb39fc45d3c30ecf71ab2c663fb1d41729.
-This intentionally DOES NOT enable multipoint or settings writes.
+Includes an explicit, one-shot answer/end-call test on macOS.
 """
 from pathlib import Path
 import sys
@@ -67,10 +67,9 @@ using GalaxyBudsClient.Model.Specifications.Touch;
 namespace GalaxyBudsClient.Model.Specifications;
 
 /// <summary>
-/// EXPERIMENTAL detection-only profile for SM-U600 (Galaxy Buds On).
-/// No configuration, firmware, or multipoint message is verified on this model.
-/// The SPP service UUID and framing below are hypotheses awaiting a device trace.
-/// BluetoothImpl blocks outgoing messages and skips SPP decoding for this model.
+/// EXPERIMENTAL SM-U600 (Galaxy Buds On) profile.
+/// The answer/end-call test uses the dedicated macOS diagnostic transport.
+/// Standard SPP decoding and the generic send paths are blocked for this model.
 /// </summary>
 public class BudsOnDeviceSpec : IDeviceSpec
 {
@@ -94,7 +93,7 @@ bluetooth = 'GalaxyBudsClient/Platform/BluetoothImpl.cs'
 replace_once(bluetooth,
     '    public async Task SendAsync(SppMessage msg)\n    {\n',
     '    public async Task SendAsync(SppMessage msg)\n    {\n'
-    '        // SM-U600 commands have not been verified. Block ALL outgoing normal frames.\n'
+    '        // The generic encoder never sends commands to SM-U600.\n'
     '        if (CurrentModel == Models.BudsOn)\n'
     '        {\n'
     '            Log.Warning("Buds On preview: outgoing SPP command blocked");\n'
@@ -149,7 +148,7 @@ replace_once(mac_bluetooth,
     '        private string _currentUuid = string.Empty;\n',
     '''        private string _currentUuid = string.Empty;
         private Action<string>? _currentDiagnostics;
-        private Action<byte[]>? _currentDiagnosticRx;
+        private Action<byte[], ulong>? _currentDiagnosticRx;
         private Action? _currentDiagnosticStarted;
 ''')
 replace_once(mac_bluetooth,
@@ -158,7 +157,7 @@ replace_once(mac_bluetooth,
 replace_once(mac_bluetooth,
     '                NewDataAvailable?.Invoke(this, byteArray);\n',
     '''                if (_currentDiagnosticRx is { } diagnosticRx)
-                    diagnosticRx(byteArray);
+                    diagnosticRx(byteArray, stamp);
                 else
                     NewDataAvailable?.Invoke(this, byteArray);
 ''')
@@ -168,7 +167,7 @@ replace_once(mac_bluetooth,
             ConnectAsync(macAddress, uuid, cancelToken, null, null, null);
 
         public async Task ConnectAsync(string macAddress, string uuid, CancellationToken cancelToken,
-            Action<string>? diagnostics, Action<byte[]>? diagnosticRx, Action? diagnosticStarted)
+            Action<string>? diagnostics, Action<byte[], ulong>? diagnosticRx, Action? diagnosticStarted)
 ''')
 replace_once(mac_bluetooth,
     '                    Log.Debug("OSX.BluetoothService: Already connected, skipped");\n',
@@ -201,7 +200,7 @@ replace_once(mac_bluetooth,
 ''')
 replace_once(mac_bluetooth,
     '                    fixed (byte* raw = data)\n',
-    '''                    // The native diagnostic connection accepts no app protocol writes, even
+    '''                    // This generic path never writes to a diagnostic connection, even
                     // if the UI has selected another device while the channel is still active.
                     if (_currentDiagnostics != null)
                         return;
@@ -267,6 +266,9 @@ internal sealed class BudsOnFrameProbe
     private bool _observeSettings;
     private long _settingsConnection;
     private SettingsSnapshot? _lastSettings;
+    public (long Frame, byte Flags)? LatestCallStatus { get; private set; }
+    public long CallCommandAckFrame { get; private set; }
+    public bool HasPartialFrame => _pendingLength != 0;
     private int _pendingLength;
     private long _validFrames;
     private long _otherSignatures;
@@ -280,6 +282,8 @@ internal sealed class BudsOnFrameProbe
         _extendedStatus = default;
         _observeSettings = observeSettings;
         _lastSettings = null;
+        LatestCallStatus = null;
+        CallCommandAckFrame = 0;
 
         if (newSettingsDevice)
         {
@@ -365,6 +369,8 @@ internal sealed class BudsOnFrameProbe
             return;
 
         var payload = _pending.AsSpan(4, payloadLength);
+        if (id == 0x42 && payload.Length > 0 && payload[0] == 0x90)
+            CallCommandAckFrame = _validFrames;
         if (id == (byte)MsgIds.STATUS_UPDATED && payloadLength >= 7)
             RecordBatteryCandidate(payload, batteryOffset: 1, ref _basicStatus);
         if (id == (byte)MsgIds.EXTENDED_STATUS_UPDATED && payloadLength == 63 &&
@@ -379,6 +385,7 @@ internal sealed class BudsOnFrameProbe
         if (!_observeSettings)
             return;
 
+        LatestCallStatus = (_validFrames, payload[GestureFlagsOffset]);
         var assignments = payload[HoldStatusOffset];
         var settings = new SettingsSnapshot(payload[EqualizerOffset],
             (byte)(payload[GestureFlagsOffset] & ObservedGestureMask),
@@ -571,6 +578,7 @@ internal static class BudsOnMacBattery
 
 write_once('GalaxyBudsClient/Platform/BudsOnDiagnostics.cs', '''using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using GalaxyBudsClient.Model.Config;
@@ -590,6 +598,56 @@ internal static class BudsOnDiagnostics
     private static int? _macBattery;
     private static Device? _receiveDevice;
     private static Device? _settingsDevice;
+    private static long _receiveSession;
+    private static ulong _receiveStamp;
+    private static long _statusObservedAt;
+    private static long _attemptedStatusFrame;
+
+    internal readonly record struct CallSample(long Session, long Frame, byte Flags)
+    {
+        public bool AnswerOrEnd => (Flags & 0x10) != 0;
+    }
+
+    public static CallSample? GetCallTestSample(Device device)
+    {
+        lock (Sync)
+        {
+            if (!ReferenceEquals(_receiveDevice, device) || _receiveStamp == 0 ||
+                FrameProbe.HasPartialFrame || FrameProbe.LatestCallStatus is not { } status ||
+                status.Frame == _attemptedStatusFrame ||
+                Stopwatch.GetElapsedTime(_statusObservedAt) > TimeSpan.FromSeconds(60))
+                return null;
+
+            return new CallSample(_receiveSession, status.Frame, status.Flags);
+        }
+    }
+
+    public static (ulong Stamp, CallSample Sample)? TakeCallTestSample(Device device, CallSample expected)
+    {
+        lock (Sync)
+        {
+            if (GetCallTestSample(device) is not { } current || current.Session != expected.Session ||
+                current.Flags != expected.Flags)
+                return null;
+
+            _attemptedStatusFrame = current.Frame;
+            return (_receiveStamp, current);
+        }
+    }
+
+    public static (byte? Flags, bool Acknowledged)? GetCallTestReadback(Device device, CallSample sent)
+    {
+        lock (Sync)
+        {
+            if (!ReferenceEquals(_receiveDevice, device) || _receiveSession != sent.Session)
+                return null;
+
+            var newer = FrameProbe.LatestCallStatus is { } status && status.Frame > sent.Frame
+                ? (byte?)status.Flags
+                : null;
+            return (newer, FrameProbe.CallCommandAckFrame > sent.Frame);
+        }
+    }
 
     public static (int? Earbuds, int? Case) GetBattery(Device device)
     {
@@ -630,6 +688,10 @@ internal static class BudsOnDiagnostics
         lock (Sync)
         {
             _receiveDevice = device;
+            _receiveSession++;
+            _receiveStamp = 0;
+            _statusObservedAt = 0;
+            _attemptedStatusFrame = 0;
             var newSettingsDevice = device != null && !ReferenceEquals(_settingsDevice, device);
             if (newSettingsDevice)
                 _settingsDevice = device;
@@ -638,17 +700,30 @@ internal static class BudsOnDiagnostics
         }
     }
 
-    public static void RecordRx(Device? device, byte[] frame)
+    public static void RecordRx(Device? device, byte[] frame, ulong stamp = 0)
     {
         lock (Sync)
         {
             if (!ReferenceEquals(_receiveDevice, device))
                 return;
+            if (_receiveStamp != 0 && stamp != _receiveStamp + 1)
+            {
+                // A missing or out-of-order callback invalidates the status and any partial frame.
+                _receiveSession++;
+                FrameProbe.ResetStream(observeSettings: device != null, newSettingsDevice: false);
+                _statusObservedAt = 0;
+                if (stamp != 0 && stamp <= _receiveStamp)
+                    return;
+            }
+            _receiveStamp = stamp;
             _chunks++;
             _bytes += frame.Length;
             if (FirstChunkLengths.Count < 16)
                 FirstChunkLengths.Add(frame.Length);
+            var previous = FrameProbe.LatestCallStatus?.Frame;
             FrameProbe.Append(frame);
+            if (FrameProbe.LatestCallStatus?.Frame != previous)
+                _statusObservedAt = Stopwatch.GetTimestamp();
             ScheduleSave();
         }
     }
@@ -732,7 +807,7 @@ replace_once(bluetooth,
                 BudsOnDiagnostics.Record("Buds On connection requested");
                 await macBackend.ConnectAsync(device.MacAddress, uuid, _connectCancelSource.Token,
                     BudsOnDiagnostics.Record,
-                    frame => BudsOnDiagnostics.RecordRx(device, frame),
+                    (frame, stamp) => BudsOnDiagnostics.RecordRx(device, frame, stamp),
                     () => BudsOnDiagnostics.ResetReceiveStream(device));
                 return true;
             }
@@ -978,10 +1053,10 @@ replace_once(native + 'src/Bluetooth.mm',
     '    BOOL _channelClosedSignalled;\n    bool _diagnosticChannel;\n')
 replace_once(native + 'src/Bluetooth.mm',
     '        mRFCOMMChannel = tempRFCOMMChannel;\n',
-    '        mRFCOMMChannel = tempRFCOMMChannel;\n        _diagnosticChannel = diagnostic != nullptr;\n')
+    '        mRFCOMMChannel = tempRFCOMMChannel;\n        _diagnosticChannel = diagnostic != nullptr;\n        ++_diagnosticStamp;\n')
 replace_once(native + 'src/Bluetooth.mm',
     '        mRFCOMMChannel = nil;\n',
-    '        mRFCOMMChannel = nil;\n        _diagnosticChannel = false;\n')
+    '        mRFCOMMChannel = nil;\n        _diagnosticChannel = false;\n        ++_diagnosticStamp;\n')
 replace_once(native + 'src/Bluetooth.mm',
     '        channel = mRFCOMMChannel;\n    }\n\n    if (channel != nil) {\n        if (![channel isOpen]) {',
     '''        // Check the mode while taking the native channel snapshot. A previously queued
@@ -1130,6 +1205,8 @@ replace_once(touchpad_view,
                     Content="{ext:Translate {x:Static i18N:Keys.TouchpadGestureHoldForCall}}"
                     Description="{Binding BudsOnCallHoldDescription, Mode=OneWay}"
                     Symbol="CallProhibited" />
+                <Button Content="Test Double tap during call…"
+                        Click="OnTestBudsOnAnswerCallClicked" />
             </controls:SettingsGroup>
 ''')
 
@@ -1185,4 +1262,297 @@ replace_once(touchpad_vm,
     }
 ''')
 
-print('Done. Buds On connection diagnostics enabled. All Buds On protocol writes are blocked.')
+write_once(native + 'src/BudsOnCallControl.h', '''#pragma once
+
+#include <array>
+#include <cstdint>
+
+inline std::array<uint8_t, 17> MakeBudsOnAnswerCallFrame(uint8_t flags, bool enabled) {
+    // The SM-U600 Samsung app writes its full touch control vector. Only the
+    // answer/end-call value changes. The current status supplies every other bit.
+    constexpr std::array<uint8_t, 8> order{7, 3, 2, 1, 0, 4, 5, 6};
+    std::array<uint8_t, 17> frame{0xfd, 0x0d, 0x00, 0x90};
+    for (std::size_t i = 0; i < order.size(); ++i)
+        frame[4 + i] = (flags >> order[i]) & 1;
+    frame[9] = enabled ? 1 : 0;
+    frame[12] = 1;
+    frame[13] = 1;
+
+    uint16_t crc = 0;
+    for (std::size_t i = 3; i < 14; ++i) {
+        crc ^= static_cast<uint16_t>(frame[i]) << 8;
+        for (int bit = 0; bit < 8; ++bit)
+            crc = static_cast<uint16_t>((crc << 1) ^ ((crc & 0x8000) ? 0x1021 : 0));
+    }
+    frame[14] = static_cast<uint8_t>(crc);
+    frame[15] = static_cast<uint8_t>(crc >> 8);
+    frame[16] = 0xdd;
+    return frame;
+}
+''')
+
+replace_once(native + 'src/Bluetooth.h',
+    'typedef void (*Bt_OnChannelData)(void *data, unsigned long size);\n',
+    'typedef void (*Bt_OnChannelData)(void *data, unsigned long size, uint64_t diagnosticStamp);\n')
+replace_once(native + 'src/Bluetooth.h',
+    '- (BT_SEND_RESULT)sendData:(char *)buffer length:(UInt32)length;\n',
+    '''- (BT_SEND_RESULT)sendData:(char *)buffer length:(UInt32)length;
+- (BT_SEND_RESULT)sendBudsOnAnswerCall:(uint64_t)stamp flags:(UInt8)flags enabled:(UInt8)enabled;
+''')
+replace_once(native + 'include/Native.h',
+    'extern BT_SEND_RESULT bt_send(BluetoothImpl *self, void *data, unsigned int length);\n',
+    '''extern BT_SEND_RESULT bt_send(BluetoothImpl *self, void *data, unsigned int length);
+extern BT_SEND_RESULT bt_send_budson_call_test(BluetoothImpl *self, uint64_t stamp, uint8_t flags, uint8_t enabled);
+''')
+replace_once(native + 'src/bridge/Native.Bluetooth.mm',
+    '''BT_SEND_RESULT bt_send(BluetoothImpl *self, void *data, unsigned int length) {
+    return [self->client sendData:static_cast<char *>(data) length:length];
+}
+''',
+    '''BT_SEND_RESULT bt_send(BluetoothImpl *self, void *data, unsigned int length) {
+    return [self->client sendData:static_cast<char *>(data) length:length];
+}
+
+BT_SEND_RESULT bt_send_budson_call_test(BluetoothImpl *self, uint64_t stamp, uint8_t flags, uint8_t enabled) {
+    return [self->client sendBudsOnAnswerCall:stamp flags:flags enabled:enabled];
+}
+''')
+replace_once(native + 'src/Bluetooth.mm',
+    '#import "NativeStringUtils.h"\n',
+    '#import "NativeStringUtils.h"\n#include "BudsOnCallControl.h"\n')
+replace_once(native + 'src/Bluetooth.mm',
+    '    NSString *_macAddress;\n',
+    '''    NSString *_macAddress;
+    uint64_t _diagnosticStamp;
+    uint64_t _lastTestStamp;
+''')
+replace_once(native + 'src/Bluetooth.mm',
+    '''- (void)rfcommChannelData:(IOBluetoothRFCOMMChannel *)rfcommChannel data:(void *)dataPointer length:(size_t)dataLength {
+    if (_onChannelData) {
+        _onChannelData(dataPointer, dataLength);
+    }
+}
+''',
+    '''- (void)rfcommChannelData:(IOBluetoothRFCOMMChannel *)rfcommChannel data:(void *)dataPointer length:(size_t)dataLength {
+    uint64_t stamp = 0;
+    @synchronized (self) {
+        if (_diagnosticChannel) {
+            if (rfcommChannel != mRFCOMMChannel)
+                return;
+            stamp = ++_diagnosticStamp;
+        }
+    }
+    if (_onChannelData)
+        _onChannelData(dataPointer, dataLength, stamp);
+}
+''')
+replace_once(native + 'src/Bluetooth.mm',
+    '- (void)setOnChannelData:(Bt_OnChannelData)callback {\n',
+    '''- (BT_SEND_RESULT)sendBudsOnAnswerCall:(uint64_t)stamp flags:(UInt8)flags enabled:(UInt8)enabled {
+    if (enabled > 1 || ((flags & 0x10) != 0) == (enabled != 0))
+        return BT_SEND_ENULL;
+
+    auto frame = MakeBudsOnAnswerCallFrame(flags, enabled != 0);
+    IOBluetoothRFCOMMChannel *channel;
+    @synchronized (self) {
+        if (!_diagnosticChannel || _channelClosedSignalled || stamp == 0 ||
+            stamp != _diagnosticStamp || stamp == _lastTestStamp || mRFCOMMChannel == nil)
+            return BT_SEND_ENULL;
+
+        _lastTestStamp = stamp;
+        channel = mRFCOMMChannel;
+    }
+
+    // The same retained channel either accepts the complete frame or fails.
+    // A close or reconnect cannot redirect a queued test to another channel.
+    if (![channel isOpen] || [channel getMTU] < frame.size())
+        return BT_SEND_ENULL;
+
+    const auto result = [channel writeSync:frame.data() length:static_cast<UInt16>(frame.size())];
+    return result == kIOReturnSuccess ? BT_SEND_SUCCESS : BT_SEND_EUNKNOWN;
+}
+
+- (void)setOnChannelData:(Bt_OnChannelData)callback {
+''')
+replace_once('GalaxyBudsClient.Platform.OSX/Unmanaged.cs',
+    '    internal delegate void Bt_OnChannelData(IntPtr data, ulong size);\n',
+    '    internal delegate void Bt_OnChannelData(IntPtr data, ulong size, ulong diagnosticStamp);\n')
+replace_once('GalaxyBudsClient.Platform.OSX/Unmanaged.cs',
+    '    internal static extern unsafe BT_SEND_RESULT bt_send(BluetoothImpl* self, byte* data, uint length);\n',
+    '''    internal static extern unsafe BT_SEND_RESULT bt_send(BluetoothImpl* self, byte* data, uint length);
+
+    [DllImport(DSO.Name, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern unsafe BT_SEND_RESULT bt_send_budson_call_test(
+        BluetoothImpl* self, ulong stamp, byte flags, byte enabled);
+''')
+replace_once(mac_bluetooth,
+    '        private void OnChannelData(IntPtr data, ulong size)\n',
+    '        private void OnChannelData(IntPtr data, ulong size, ulong stamp)\n')
+replace_once(mac_bluetooth,
+    '        #region Transmission\n',
+    '''        #region Transmission
+        public bool TrySendBudsOnCallTest(string expectedMac, byte flags, bool enabled,
+            Func<ulong?> getCurrentStamp)
+        {
+            if (!ConnSemaphore.Wait(0))
+                return false;
+
+            try
+            {
+                if (!SendSemaphore.Wait(0))
+                    return false;
+
+                try
+                {
+                    if (_currentDiagnosticRx == null ||
+                        !string.Equals(_currentMac, expectedMac, StringComparison.OrdinalIgnoreCase) ||
+                        getCurrentStamp() is not { } stamp)
+                        return false;
+
+                    unsafe
+                    {
+                        return Bluetooth.bt_send_budson_call_test(_nativePtr, stamp, flags, enabled ? (byte)1 : (byte)0)
+                            == BT_SEND_RESULT.BT_SEND_SUCCESS;
+                    }
+                }
+                finally
+                {
+                    SendSemaphore.Release();
+                }
+            }
+            finally
+            {
+                ConnSemaphore.Release();
+            }
+        }
+
+''')
+
+replace_once(bluetooth,
+    '    public async Task SendAltAsync(SppAlternativeMessage msg)\n    {\n'
+    '        // Block SMEP/MDE property writes',
+    '''    internal bool IsBudsOnCallTestDevice(Device device) =>
+        PlatformUtils.IsOSX && !AlternativeModeEnabled && IsConnected &&
+        device.Model == Models.BudsOn && ReferenceEquals(Device.Current, device);
+
+    internal async Task<string> TestBudsOnAnswerCallAsync(Device device, BudsOnDiagnostics.CallSample expected)
+    {
+#if OSX
+        if (_backend is OSX.BluetoothService backend && IsBudsOnCallTestDevice(device))
+        {
+            var sentSample = expected;
+            var enable = !expected.AnswerOrEnd;
+            var sent = await Task.Run(() => backend.TrySendBudsOnCallTest(
+                device.MacAddress, expected.Flags, enable, () =>
+                {
+                    if (!IsBudsOnCallTestDevice(device) ||
+                        BudsOnDiagnostics.TakeCallTestSample(device, expected) is not { } approved)
+                        return null;
+
+                    sentSample = approved.Sample;
+                    return approved.Stamp;
+                }));
+            if (sent)
+            {
+                BudsOnDiagnostics.Record($"Call control test sent ({(enable ? "On" : "Off")})");
+                var outcome = await WaitForBudsOnCallTestAsync(device, sentSample);
+                BudsOnDiagnostics.Record(outcome);
+                return outcome;
+            }
+        }
+#endif
+        return "The test frame was not sent. Reconnect to refresh the earbuds’ status before testing again.";
+    }
+
+    private async Task<string> WaitForBudsOnCallTestAsync(Device device, BudsOnDiagnostics.CallSample sent)
+    {
+        var acknowledged = false;
+        for (var i = 0; i < 32; i++)
+        {
+            await Task.Delay(250);
+            if (!IsBudsOnCallTestDevice(device) ||
+                BudsOnDiagnostics.GetCallTestReadback(device, sent) is not { } readback)
+                return "The connection changed before the result could be verified. Check the setting on your Galaxy.";
+
+            acknowledged |= readback.Acknowledged;
+            if (readback.Flags == (byte)(sent.Flags ^ 0x10))
+                return "The earbuds reported the new call setting and the other touch flags matched.";
+            if (readback.Flags is byte flags && ((flags ^ sent.Flags) & 0xEF) != 0)
+                return "Other touch flags changed during the test. Check the settings on your Galaxy.";
+        }
+
+        return acknowledged
+            ? "The earbuds acknowledged the command. Check your Galaxy to confirm the setting changed."
+            : "The command was sent. Check your Galaxy to confirm the setting changed.";
+    }
+
+    public async Task SendAltAsync(SppAlternativeMessage msg)
+    {
+        // Block SMEP/MDE property writes''')
+
+touchpad_code = 'GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml.cs'
+replace_once(touchpad_code,
+    'using Avalonia.Interactivity;\n',
+    'using Avalonia.Controls;\nusing Avalonia.Interactivity;\nusing FluentAvalonia.UI.Controls;\n')
+replace_once(touchpad_code,
+    'using GalaxyBudsClient.Model.Config;\n',
+    'using GalaxyBudsClient.Model.Config;\nusing GalaxyBudsClient.Platform;\n')
+replace_once(touchpad_code,
+    '    public TouchpadPage()\n',
+    '''    private bool _budsOnCallTestOpen;
+
+    public TouchpadPage()
+''')
+replace_once(touchpad_code,
+    '    private void OnEditLeftCustomActionClicked(object? sender, RoutedEventArgs e)\n',
+    '''    private async void OnTestBudsOnAnswerCallClicked(object? sender, RoutedEventArgs e)
+    {
+        if (_budsOnCallTestOpen || TopLevel.GetTopLevel(this) is not { } host)
+            return;
+
+        var bluetooth = BluetoothImpl.Instance;
+        var device = bluetooth.Device.Current;
+        if (device == null || !bluetooth.IsBudsOnCallTestDevice(device))
+            return;
+
+        _budsOnCallTestOpen = true;
+        try
+        {
+            if (BudsOnDiagnostics.GetCallTestSample(device) is not { } sample)
+            {
+                await new MessageBox
+                {
+                    Title = "Fresh earbuds status needed",
+                    Description = "Reconnect your Buds On, then open this test as soon as the call settings appear."
+                }.ShowAsync();
+                return;
+            }
+
+            var target = sample.AnswerOrEnd ? "Off" : "On";
+            var dialog = new FAContentDialog
+            {
+                Title = "Test Double tap during call",
+                Content = $"Confirm these are your Galaxy Buds On (SM-U600). This sends one Bluetooth command to turn the setting {target}. Check the setting on your Galaxy afterward.",
+                PrimaryButtonText = $"Set {target} once",
+                CloseButtonText = "Cancel",
+                DefaultButton = FAContentDialogButton.Close
+            };
+            if (await dialog.ShowAsync(host) != FAContentDialogResult.Primary)
+                return;
+
+            await new MessageBox
+            {
+                Title = "Call control test",
+                Description = await bluetooth.TestBudsOnAnswerCallAsync(device, sample)
+            }.ShowAsync();
+        }
+        finally
+        {
+            _budsOnCallTestOpen = false;
+        }
+    }
+
+    private void OnEditLeftCustomActionClicked(object? sender, RoutedEventArgs e)
+''')
+
+print('Done. Buds On diagnostics and one-shot call control test enabled.')
