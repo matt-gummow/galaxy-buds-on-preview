@@ -300,7 +300,10 @@ internal sealed class BudsOnFrameProbe
         foreach (var value in chunk)
         {
             if (_pendingLength == 0 && value != Start)
+            {
+                LatestCallStatus = null;
                 continue;
+            }
 
             _pending[_pendingLength++] = value;
             DrainFrames();
@@ -315,6 +318,7 @@ internal sealed class BudsOnFrameProbe
             int size = header & MaximumBodyLength;
             if (size < 3)
             {
+                LatestCallStatus = null;
                 MoveToNextStart(1);
                 continue;
             }
@@ -325,6 +329,7 @@ internal sealed class BudsOnFrameProbe
 
             if (_pending[frameLength - 1] != End || !HasValidChecksum(size))
             {
+                LatestCallStatus = null;
                 MoveToNextStart(1);
                 continue;
             }
@@ -366,17 +371,23 @@ internal sealed class BudsOnFrameProbe
             _otherSignatures++;
 
         if (isFragment)
+        {
+            if (id == (byte)MsgIds.EXTENDED_STATUS_UPDATED)
+                LatestCallStatus = null;
             return;
+        }
 
         var payload = _pending.AsSpan(4, payloadLength);
         if (id == 0x42 && payload.Length > 0 && payload[0] == 0x90)
             CallCommandAckFrame = _validFrames;
         if (id == (byte)MsgIds.STATUS_UPDATED && payloadLength >= 7)
             RecordBatteryCandidate(payload, batteryOffset: 1, ref _basicStatus);
-        if (id == (byte)MsgIds.EXTENDED_STATUS_UPDATED && payloadLength == 63 &&
-            RecordBatteryCandidate(payload, batteryOffset: 2, ref _extendedStatus))
+        if (id == (byte)MsgIds.EXTENDED_STATUS_UPDATED)
         {
-            RecordSettingsCandidate(payload);
+            if (payloadLength == 63 && RecordBatteryCandidate(payload, batteryOffset: 2, ref _extendedStatus))
+                RecordSettingsCandidate(payload);
+            else
+                LatestCallStatus = null;
         }
     }
 
