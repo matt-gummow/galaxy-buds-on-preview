@@ -27,6 +27,8 @@ Open **Settings → Copy Buds On connection report** after connecting or attempt
 
 The report summarizes complete 8-byte `0x76` multipoint notices. It includes the firmware’s support flag, connection state, audio focus, and known streaming profiles. The final three unverified payload bytes are omitted. An earlier SM-U600 report showed the firmware support flag and a multiple-device state. The subsequent simultaneous Galaxy phone and Mac connection attempt failed. That report showed a one-device state with the support flag still set. The current preview supports using one of those audio hosts at a time. Samsung documents Auto Switch for compatible Galaxy devices and Windows PCs running Galaxy Connect. [Samsung Galaxy Buds On](https://www.samsung.com/us/audio-sound/galaxy-buds-on/)
 
+In a Galaxy Book and Galaxy phone test, the listener heard audio switch to the phone and back. During the same recording, the Book requested a disconnect of its classic Bluetooth link to the Buds and reconnected 4.82 seconds after the controller reported the disconnect. The recording covers only the Book and contains no call markers. Whether the phone and Book held simultaneous audio connections during the call is still unknown.
+
 SM-U600 disables the generic multipoint capability in Samsung’s app profile. The [upstream MDE patch](https://github.com/timschneeb/GalaxyBudsClient/pull/729) is disabled for this model. Factory reset, firmware operations, and generic configuration writes are also disabled.
 
 ## Protocol evidence
