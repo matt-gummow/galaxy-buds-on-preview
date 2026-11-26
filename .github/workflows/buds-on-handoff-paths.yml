@@ -1,0 +1,69 @@
+name: Build Buds On handoff path reader
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [diagnostics/buds-on-handoff-paths]
+    paths:
+      - 'tools/buds-on-handoff-paths/**'
+      - '.github/workflows/buds-on-handoff-paths.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      TOOL_ROOT: tools/buds-on-handoff-paths
+      DOTNET_NOLOGO: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Publish portable Windows x64 reader
+        shell: pwsh
+        run: |
+          $publish = Join-Path $env:RUNNER_TEMP 'published-reader'
+          dotnet publish "$env:TOOL_ROOT/reader/Callsites.csproj" -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -p:DebugSymbols=false -o $publish
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $kit = New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/handoff-kit"
+          Copy-Item "$publish/BudsOnCallsites.exe" $kit
+          Copy-Item "$env:TOOL_ROOT/Read-Buds-Handoff-Paths.cmd","$env:TOOL_ROOT/Read-Buds-Handoff-Paths.ps1" $kit
+          & "$kit/BudsOnCallsites.exe" --self-test
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Exercise Windows PowerShell launcher with local fixture packages
+        shell: powershell
+        run: |
+          $kit = Join-Path $env:RUNNER_TEMP 'handoff-kit'
+          $source = Join-Path $kit 'Read-Buds-Handoff-Paths.ps1'
+          $tokens = $null
+          $errors = $null
+          [void][Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
+          if ($errors.Count) { throw $errors[0].Message }
+          . $source
+          $fixture = (New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/private-fixture-name").FullName
+          $libDir = (New-Item -ItemType Directory -Path "$fixture/lib").FullName
+          Add-Type -TypeDefinition 'public class BudsAutoSwitch { public int GetState() { return 1; } }' -OutputAssembly "$libDir/EasyConnectLib.dll"
+          function Get-AppxPackage([string] $Name) {
+              if ($Name -eq 'Known') {
+                  [pscustomobject]@{ PackageFamilyName = 'Known_publisher'; InstallLocation = $fixture; Version = [version]'1.2.3.4' }
+              }
+              [pscustomobject]@{ PackageFamilyName = 'Wrong_publisher'; InstallLocation = $fixture; Version = [version]'9.9.9.9' }
+          }
+          $writer = [IO.StringWriter]::new()
+          $seen = @{}
+          $reader = Join-Path $kit 'BudsOnCallsites.exe'
+          Write-BudsPackage 'First' 'Known' 'Known_publisher' $reader $writer $seen
+          Write-BudsPackage 'Second' 'Known' 'Known_publisher' $reader $writer $seen
+          Write-BudsPackage 'Absent' 'Other' 'Other_publisher' $reader $writer $seen
+          $text = $writer.ToString()
+          if ($text -notmatch 'Registered version 1\.2\.3\.4' -or $text -notmatch 'Identical file contents to First #1' -or $text -notmatch 'not registered') { throw 'Package inspection or exact-family filtering failed.' }
+          if ($text -match 'private-fixture-name|9\.9\.9\.9') { throw 'Report included a private path or unrelated package.' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Buds-On-Handoff-Paths-Windows-x64
+          path: ${{ runner.temp }}/handoff-kit/
+          if-no-files-found: error
