@@ -9,9 +9,11 @@ public sealed class ObservedSettings
 {
     private readonly DateTimeOffset origin;
     private readonly TextWriter output;
+    private readonly ObservedFrameInventory inventory;
     private int direct, version, status, versionReports, otherPropertyWrites, related, acknowledgements, omitted;
     private int vendorHandoff, standardHandoff, unboundHandoff, announcements;
-    private readonly int[] shown = new int[10];
+    private int clearHandoff, unboundClearHandoff, vendorSetup, unboundSetup, streamStates, unboundStreamStates;
+    private readonly int[] shown = new int[13];
     private const int MaxEvidenceLines = 48;
     private static readonly TimeSpan ComparisonWindow = TimeSpan.FromSeconds(5);
 
@@ -29,6 +31,7 @@ public sealed class ObservedSettings
     {
         this.origin = origin;
         this.output = output;
+        inventory = new ObservedFrameInventory(origin, output);
     }
 
     private void Record(int category, DateTimeOffset time, string evidence, string service)
@@ -89,10 +92,25 @@ public sealed class ObservedSettings
         return ", version-field comparison inconclusive";
     }
 
-    // Reference forms from buds-sync.swift and budsctl.swift in hoshsadiq/buds4-pro-poc
-    // at be75d186314ed91fd078c549cd22befd8b639856.
-    // The vendor reference sets the wire type bit on a host-originated message.
-    // Host direction always comes independently from the captured HCI record.
+    // Match the two computer metadata layouts published by alephscalioni/budsClient
+    // (75ff342, SamsungMdePacket.swift) and Clascheurduturfu/galaxy-continuity-mac
+    // (13f0a52, BudsProtocol.swift). These fixtures classify saved data only.
+    private static string ComputerSettingsReference(byte[] payload)
+    {
+        if (payload.Length != 18 || payload[0] != 0x73 || payload[1] != 1 || payload[2] != 1 ||
+            payload[3] != 4 || payload[4] != 0 || payload[5] != 1 || payload[7] != 0) return null;
+        for (int i = 11; i < payload.Length; i++)
+            if (payload[i] != 0) return null;
+        if (payload[6] == 0x75 && payload[8] == 0x2A && payload[9] == 0x41 && payload[10] == 0x0C)
+            return "Samsung reference";
+        if (payload[6] == 0x4C && payload[8] == 0 && payload[9] == 0 && payload[10] == 0)
+            return "Apple reference";
+        return null;
+    }
+
+    // The older vendor fixture in hoshsadiq/buds4-pro-poc (be75d18) sets the
+    // wire type bit; the two Mac references clear it. Neither bit establishes
+    // host direction. The caller obtains direction independently from HCI.
     private void ObserveHandoff(DateTimeOffset time, bool alternative, int id, bool wireTypeBit,
                                 byte[] payload, string service)
     {
@@ -103,7 +121,24 @@ public sealed class ObservedSettings
             payload[0] == 0x71 && payload[1] == 1)
         {
             if (service == expectedService) vendorHandoff++; else unboundHandoff++;
-            Record(7, time, "Book sent a frame matching the vendor computer audio-handoff request shape", service);
+            Record(7, time, "Book sent a frame matching the vendor computer audio-handoff request shape (wire flag set)", service);
+        }
+        else if (alternative && id == 1 && !wireTypeBit)
+        {
+            if (payload.Length == 2 && payload[0] == 0x71 && payload[1] == 1)
+            {
+                if (service == expectedService) clearHandoff++; else unboundClearHandoff++;
+                Record(10, time, "Book sent a frame matching the clear-flag vendor computer handoff request", service);
+            }
+            else
+            {
+                string reference = ComputerSettingsReference(payload);
+                if (reference != null)
+                {
+                    if (service == expectedService) vendorSetup++; else unboundSetup++;
+                    Record(11, time, "Book sent a frame matching vendor computer settings info (" + reference + ")", service);
+                }
+            }
         }
         else if (!alternative && id == 0x71 && !wireTypeBit && payload.Length == 1 && payload[0] == 1)
         {
@@ -125,6 +160,7 @@ public sealed class ObservedSettings
         bool alternative, int messageId, bool response, byte[] payload, string service, bool overlap = false,
         bool handoffOnly = false)
     {
+        inventory.Frame(time, fromBook, alternative, messageId, response, payload, service, handoffOnly);
         bool confirmed = service == "Samsung SMEP";
         if (!confirmed || overlap) Interrupt(time, channelId, dlci);
         bool propertyWrite = alternative && messageId == 1 && payload != null && payload.Length >= 1 &&
@@ -136,7 +172,15 @@ public sealed class ObservedSettings
         if (alternative)
         {
             if (service == "Samsung SPP" || messageId != 1 || payload.Length < 1) return;
-            // Only the version byte is used for comparison. Trailing fields stay opaque.
+            if (!fromBook && !overlap && (confirmed || service == "unconfirmed"))
+            {
+                string state = ObservedStreamState.Describe(payload);
+                if (state != null)
+                {
+                    if (confirmed) streamStates++; else unboundStreamStates++;
+                    Record(12, time, "Buds sent a frame matching a reference stream-state layout; " + state, service);
+                }
+            }
             if (fromBook && payload[0] == 0x43)
             {
                 if (payload.Length >= 8 && payload[1] == 4 && payload[2] == 3 &&
@@ -162,8 +206,9 @@ public sealed class ObservedSettings
                      payload[2] == 5 && payload[3] == 0x4c && payload[4] == 0x0b)
             {
                 versionReports++;
-                string detail = confirmed ? Compare(time, channelId, dlci, payload[7]) : "";
-                Record(1, time, "Buds sent a notification matching the upstream MDE host-version format" + detail, service);
+                string detail = confirmed ? Compare(time, channelId, dlci, payload[7]) +
+                    " (historical byte comparison; echo semantics unverified)" : "";
+                Record(1, time, "Buds sent a notification matching the MDE property header" + detail, service);
             }
             return;
         }
@@ -200,11 +245,18 @@ public sealed class ObservedSettings
 
     public void Finish()
     {
-        output.WriteLine("Book audio-handoff request shapes on SDP-matched services: vendor {0}, regular {1}. Matching shapes on an unconfirmed service: {2}.",
+        output.WriteLine("Original Book audio-handoff request shapes on SDP-matched services: vendor {0}, regular {1}. Matching shapes on an unconfirmed service: {2}.",
             vendorHandoff, standardHandoff, unboundHandoff);
+        output.WriteLine("Clear-flag vendor computer handoff requests: SDP-matched {0}, unconfirmed service {1}.",
+            clearHandoff, unboundClearHandoff);
         output.WriteLine("Host transport announcement shapes (context only) = {0}.", announcements);
-        if (vendorHandoff + standardHandoff + unboundHandoff == 0)
-            output.WriteLine("Neither reference handoff request shape was observed in this interval. Incomplete capture, other formats, or other transports can hide a handoff.");
+        output.WriteLine("Vendor computer settings info (context only): SDP-matched {0}, unconfirmed service {1}.",
+            vendorSetup, unboundSetup);
+        output.WriteLine("Reference stream-state reports: SDP-matched {0}, unconfirmed service {1}.",
+            streamStates, unboundStreamStates);
+        output.WriteLine("Direction comes from the captured HCI records. The wire flag distinguishes frame layouts. Settings info and reported stream state are context only.");
+        if (vendorHandoff + standardHandoff + unboundHandoff + clearHandoff + unboundClearHandoff == 0)
+            output.WriteLine("Neither reference handoff request shape was observed in the original two-format check; the clear-flag vendor check also found none. Incomplete capture, other formats, or other transports can hide a handoff.");
         else
             output.WriteLine("A request-shape match identifies a Book transmission. Its effect on Buds On, audio movement, and simultaneous phone connectivity remain unverified by that frame.");
         output.WriteLine("Book multipoint-setting format matches = {0}; MDE version writes = {1}; separate seamless-setting matches = {2}.",
@@ -216,7 +268,9 @@ public sealed class ObservedSettings
         if (omitted != 0)
             output.WriteLine("Additional repeated observations omitted from timeline = " + omitted + ".");
         if (versionReports != 0 && version != 0)
-            output.WriteLine("Version-field comparisons use a preceding write on the same confirmed SMEP channel within five seconds. A notification alone cannot establish command acceptance or a simultaneous phone link.");
+            output.WriteLine("The historical comparison uses candidate bytes in a preceding write and a notification on the same confirmed SMEP channel within five seconds. The notification's compared byte has no verified version meaning on this model.");
+        inventory.Summary();
         writes.Clear();
     }
 }
+

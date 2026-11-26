@@ -107,8 +107,10 @@ public static class AnalyzeSavedTrace
             using (StreamWriter writer = new StreamWriter(new FileStream(output, FileMode.CreateNew, FileAccess.Write, FileShare.None)))
             {
                 writer.WriteLine("Galaxy Buds On | Galaxy Book audio handoff check");
+                writer.WriteLine("Saved trace comparison, revision 2.");
                 writer.WriteLine("Times are seconds from the original report start. Only the Book's Bluetooth link was captured. The Fold's simultaneous audio connection cannot be determined from this file.");
-                writer.WriteLine("This check looks for a Book-to-Buds request matching a published Buds4 Pro audio-handoff format. It also reports audio channels, version messages and transport announcements when captured. A matching request cannot establish that it caused a switch. Other message formats, missing packets and low-energy connections can fall outside this scan.");
+                writer.WriteLine("This read-only comparison covers published computer handoff formats, settings announcements and candidate stream-status notifications. Command direction comes from the recorded controller event. Header flags are reported separately.");
+                writer.WriteLine("The classic-channel decoder checks complete, checksum-valid, sequence-zero frames. Gaps, other packet layouts and low-energy traffic can hide a request. A match alone cannot establish what triggered the switch or whether both audio links were active.");
                 try { SavedBudsReader.Scan(capture.Etl, capture.Origin, writer); }
                 catch (Exception) { writer.WriteLine("Reading stopped. Any displayed matches form a partial timeline."); }
             }
