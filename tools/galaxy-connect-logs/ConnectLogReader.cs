@@ -185,9 +185,10 @@ public static class ConnectLogReader
     }
     private static string Choose()
     {
-        Console.WriteLine("Press Enter to collect existing Samsung logs, or type E to select a ZIP you already have. Q exits.");
+        Console.WriteLine("Press Enter to collect existing Samsung logs, E to open an existing ZIP, I for installed software only, or Q to exit.");
         string choice = Console.ReadLine();
-        if (choice == null || choice.Trim().Equals("Q", StringComparison.OrdinalIgnoreCase)) return null;
+        if (choice == null || choice.Trim().Equals("Q", StringComparison.OrdinalIgnoreCase)) throw new OperationCanceledException();
+        if (choice.Trim().Equals("I", StringComparison.OrdinalIgnoreCase)) return null;
         if (choice.Trim().Length == 0)
         {
             try { Process.Start(new ProcessStartInfo("samsung-mcfcore://collectlogs") { UseShellExecute = true }); }
@@ -203,21 +204,53 @@ public static class ConnectLogReader
             return picker.ShowDialog() == DialogResult.OK ? picker.FileName : null;
         }
     }
+    private static string DisplayVersion(string raw)
+    {
+        Version version;
+        if (raw == null || !Regex.IsMatch(raw, @"\A[0-9]{1,5}(?:\.[0-9]{1,5}){3}\z") || !Version.TryParse(raw, out version) ||
+            version.Major > 65535 || version.Minor > 65535 || version.Build > 65535 || version.Revision > 65535)
+            return "unknown for the checked package family";
+        return version.ToString(4);
+    }
+    public static void InstalledVersions(string connect, string settings, TextWriter output)
+    {
+        output.WriteLine("Currently registered Galaxy Connect package: " + DisplayVersion(connect));
+        output.WriteLine("Currently registered Samsung Settings 1.5 family: " + DisplayVersion(settings));
+        output.WriteLine("Installed versions refer to this user at scan time. Earlier installations and other package families are outside this check.");
+    }
     public static int Run(string inputZip)
+    {
+        return Run(inputZip, null, null, null, null);
+    }
+    public static int Run(string inputZip, string connectVersion, string connectFolder, string settingsVersion, string settingsFolder)
     {
         try
         {
             string path = String.IsNullOrWhiteSpace(inputZip) ? Choose() : inputZip;
-            if (path == null) return 0;
-            path = Path.GetFullPath(path);
+            if (path != null) path = Path.GetFullPath(path);
             var desk = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
             if (String.IsNullOrWhiteSpace(desk)) throw new IOException();
             string report = Path.Combine(desk, "Galaxy-Connect-handoff-" + Guid.NewGuid().ToString("N").Substring(0,8) + ".txt");
-            using (var input = File.OpenRead(path))
             using (var text = new StringWriter(CultureInfo.InvariantCulture))
             {
-                if (input.Length > 512 * MiB) { Console.WriteLine("This ZIP exceeds the 512 MiB archive limit."); return 1; }
-                Summarize(input, TimeZoneInfo.Local, text);
+                text.WriteLine("Galaxy Book | Samsung Windows switching investigation");
+                InstalledVersions(connectVersion, settingsVersion, text);
+                try { InstalledConnectEvidence.Write(connectFolder, settingsFolder, text); }
+                catch (Exception) { text.WriteLine("Installed-file analysis unavailable. Historical ZIP analysis is independent."); }
+                text.WriteLine();
+                if (path == null) text.WriteLine("No historical ZIP was selected. This report covers current installed software only.");
+                else
+                {
+                    try
+                    {
+                        using (var input = File.OpenRead(path))
+                        {
+                            if (input.Length > 512 * MiB) text.WriteLine("ZIP exceeds the 512 MiB archive limit. Historical coverage unavailable.");
+                            else Summarize(input, TimeZoneInfo.Local, text);
+                        }
+                    }
+                    catch (Exception) { text.WriteLine("Could not read the selected ZIP. Historical coverage unavailable."); }
+                }
                 using (var writer = new StreamWriter(new FileStream(report, FileMode.CreateNew, FileAccess.Write, FileShare.None)))
                     writer.Write(text.ToString());
             }
@@ -225,6 +258,7 @@ public static class ConnectLogReader
             try { Process.Start("explorer.exe", "/select,\"" + report + "\""); } catch (System.ComponentModel.Win32Exception) { }
             return 0;
         }
-        catch (Exception) { Console.WriteLine("Could not read the archive or write the report. Confirm the selected ZIP can be opened in Windows and the Desktop is writable."); return 1; }
+        catch (OperationCanceledException) { return 0; }
+        catch (Exception) { Console.WriteLine("Could not complete the report. Check that the Desktop is writable."); return 1; }
     }
 }

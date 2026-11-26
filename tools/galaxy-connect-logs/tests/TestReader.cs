@@ -17,6 +17,14 @@ public static class TestReader
     }
     public static int Main()
     {
+        InstalledConnectEvidenceTests.Run();
+        using (var writer = new StringWriter())
+        {
+            ConnectLogReader.InstalledVersions("4.6.1327.0", "SECRET_PATH", writer);
+            Need(writer.ToString(), "Galaxy Connect package: 4.6.1327.0");
+            Need(writer.ToString(), "Settings 1.5 family: unknown for the checked package family");
+            if (writer.ToString().Contains("SECRET_PATH")) throw new Exception("Untrusted version reached report.");
+        }
         var local = TimeZoneInfo.CreateCustomTimeZone("test", TimeSpan.FromHours(-7), "test", "test");
         using (var ms = new MemoryStream())
         {
