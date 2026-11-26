@@ -55,7 +55,7 @@ jobs:
           xcodebuild -version
           dotnet --version
           uname -m
-          printf 'NUGET_PACKAGES=%s/budson-nuget\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'NUGET_PACKAGES=%s/budson-nuget/\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Apply Buds On preview patch
         shell: bash
