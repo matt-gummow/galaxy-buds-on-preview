@@ -107,7 +107,7 @@ public static class AnalyzeSavedTrace
             using (StreamWriter writer = new StreamWriter(new FileStream(output, FileMode.CreateNew, FileAccess.Write, FileShare.None)))
             {
                 writer.WriteLine("Galaxy Buds On | Galaxy Book audio handoff check");
-                writer.WriteLine("Saved trace comparison, revision 2.");
+                writer.WriteLine("Saved trace comparison, revision 3 (host setup).");
                 writer.WriteLine("Times are seconds from the original report start. Only the Book's Bluetooth link was captured. The Fold's simultaneous audio connection cannot be determined from this file.");
                 writer.WriteLine("This read-only comparison covers published computer handoff formats, settings announcements and candidate stream-status notifications. Command direction comes from the recorded controller event. Header flags are reported separately.");
                 writer.WriteLine("The classic-channel decoder checks complete, checksum-valid, sequence-zero frames. Gaps, other packet layouts and low-energy traffic can hide a request. A match alone cannot establish what triggered the switch or whether both audio links were active.");

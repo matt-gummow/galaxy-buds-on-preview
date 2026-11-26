@@ -11,6 +11,7 @@ public sealed class ObservedSettings
     private readonly TextWriter output;
     private readonly ObservedFrameInventory inventory;
     private int direct, version, status, versionReports, otherPropertyWrites, related, acknowledgements, omitted;
+    private int neutralVersion2, neutralVersion3, otherExtended;
     private int vendorHandoff, standardHandoff, unboundHandoff, announcements;
     private int clearHandoff, unboundClearHandoff, vendorSetup, unboundSetup, streamStates, unboundStreamStates;
     private readonly int[] shown = new int[13];
@@ -108,6 +109,19 @@ public sealed class ObservedSettings
         return null;
     }
 
+    // Called only for a validated MDE header on an attributed, unambiguous outgoing
+    // SMEP request. Compare against BudsProtocol.swift mdeVersion at 13f0a52.
+    private string CompareExtendedRequest(byte[] payload)
+    {
+        if (payload.Length == 11 && payload[8] == 0 && payload[9] == 0 && payload[10] == 0)
+        {
+            if (payload[7] == 2) { neutralVersion2++; return ", exact match to the zero-field v2 reference"; }
+            if (payload[7] == 3) { neutralVersion3++; return ", exact match to the zero-field v3 reference"; }
+        }
+        otherExtended++;
+        return ", no exact match to either zero-field reference";
+    }
+
     // The older vendor fixture in hoshsadiq/buds4-pro-poc (be75d18) sets the
     // wire type bit; the two Mac references clear it. Neither bit establishes
     // host direction. The caller obtains direction independently from HCI.
@@ -192,6 +206,8 @@ public sealed class ObservedSettings
                     if (confirmed)
                     {
                         detail = payload[3] == 4 ? ", version-only layout" : ", extended layout";
+                        if (payload.Length > 8 && !response && !overlap)
+                            detail += CompareExtendedRequest(payload);
                         Remember(time, channelId, dlci, payload[7], overlap);
                     }
                     Record(0, time, "Book sent a property matching the upstream MDE host-version format" + detail, service);
@@ -261,6 +277,8 @@ public sealed class ObservedSettings
             output.WriteLine("A request-shape match identifies a Book transmission. Its effect on Buds On, audio movement, and simultaneous phone connectivity remain unverified by that frame.");
         output.WriteLine("Book multipoint-setting format matches = {0}; MDE version writes = {1}; separate seamless-setting matches = {2}.",
             direct, version, related);
+        output.WriteLine("Extended MDE requests compared on confirmed Samsung SMEP (clear wire flag): exact zero-field v2 {0}, v3 {1}, other extended {2}.",
+            neutralVersion2, neutralVersion3, otherExtended);
         output.WriteLine("Buds status reports = {0}; MDE notifications = {1}; other Book SMEP property writes = {2}.",
             status, versionReports, otherPropertyWrites);
         output.WriteLine("Generic acknowledgements referencing the candidate message ID = {0}.", acknowledgements);

@@ -152,6 +152,38 @@ public static class TestControlTimeline
             throw new Exception("Comparison crossed a DLCI boundary.");
     }
 
+    private static void CheckExtendedRequestComparison(DateTimeOffset origin)
+    {
+        var output = new StringWriter();
+        var parser = new ObservedSettings(origin, output);
+        byte[] v2 = Hex("43 04 03 07 00 00 0b 02 00 00 00");
+        byte[] v3 = Hex("43 04 03 07 00 00 0b 03 00 00 00");
+        Action<byte[]> write = data => parser.Frame(origin, true, 4, 2, true, 1, false, data, "Samsung SMEP");
+        write(v2);
+        write(v3);
+        for (int i = 7; i < v3.Length; i++)
+        {
+            byte[] changed = (byte[])v3.Clone();
+            changed[i] = 0xfa;
+            write(changed);
+        }
+        write(Hex("43 04 03 08 00 00 0b 03 00 00 00 00")); // trailing byte
+        write(Hex("43 04 03 04 00 00 0b 03")); // version-only write
+        write(Hex("43 04 03 06 00 00 0b 03 00 00 00")); // bad declared length
+        parser.Frame(origin, false, 4, 2, true, 1, false, v3, "Samsung SMEP");
+        parser.Frame(origin, true, 4, 2, true, 1, true, v3, "Samsung SMEP");
+        parser.Frame(origin, true, 4, 2, true, 1, false, v3, "unconfirmed");
+        parser.Frame(origin, true, 4, 2, true, 1, false, v3, "Samsung SMEP", true);
+        parser.Finish();
+        string details = output.ToString();
+        if (Occurrences(details, "exact match to the zero-field v2 reference") != 1 ||
+            Occurrences(details, "exact match to the zero-field v3 reference") != 1 ||
+            Occurrences(details, "no exact match to either zero-field reference") != 5 ||
+            !details.Contains("exact zero-field v2 1, v3 1, other extended 5.") ||
+            details.Contains("250") || details.Contains("0xfa"))
+            throw new Exception("Extended MDE reference classification or redaction failed.");
+    }
+
     private static void CheckHandoffEvidence(DateTimeOffset origin)
     {
         byte[] vendor = Hex("fc 05 10 01 71 01 79 1c cc");
@@ -434,6 +466,7 @@ public static class TestControlTimeline
             || !details.Contains("requested state off") || details.Contains("MARK"))
             throw new Exception("Version negotiation and status-only fixture check failed.");
         CheckVersionTimeline(time);
+        CheckExtendedRequestComparison(time);
         CheckHandoffEvidence(time);
         CheckVendorReplay(time);
         CheckFrameInventory(time);
