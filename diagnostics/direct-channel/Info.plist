@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>io.github.matt-gummow.budson-direct-check</string>
+<key>CFBundleName</key><string>Buds On Connection Check</string>
+<key>CFBundleDisplayName</key><string>Buds On Connection Check</string>
+<key>CFBundleExecutable</key><string>BudsOnConnectionCheck</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>1.0</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>LSMinimumSystemVersion</key><string>13.0</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSBluetoothAlwaysUsageDescription</key><string>Check whether opening your paired Buds On control channel interrupts phone playback. No earbud settings or firmware are changed.</string>
+<key>NSBluetoothPeripheralUsageDescription</key><string>Check the paired Buds On control channel.</string>
+<key>NSPrincipalClass</key><string>NSApplication</string>
+</dict></plist>

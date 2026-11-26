@@ -1,0 +1,40 @@
+name: Build Buds On direct connection check
+on:
+  push:
+    branches: [experimental/buds-on-mac-handoff]
+    paths:
+      - 'diagnostics/direct-channel/**'
+      - '.github/workflows/build-direct-channel.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  macos-arm64:
+    name: Test and package direct connection check
+    runs-on: xcode-27
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test transport lifecycle
+        shell: bash
+        run: |
+          bash diagnostics/direct-channel/tests/run-tests.sh
+          bash diagnostics/direct-channel/tests/run-ui-tests.sh
+      - name: Build Apple Silicon installer
+        shell: bash
+        run: bash diagnostics/direct-channel/build.sh "$RUNNER_TEMP/direct-channel"
+      - name: Verify installer payload
+        shell: bash
+        run: |
+          pkgutil --expand-full "$RUNNER_TEMP/direct-channel/Buds-On-Connection-Check-arm64.pkg" "$RUNNER_TEMP/check-expanded"
+          executable="$(find "$RUNNER_TEMP/check-expanded" -type f -name BudsOnConnectionCheck -print -quit)"
+          test -n "$executable"
+          lipo -verify_arch arm64 "$executable"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Buds-On-Connection-Check-arm64
+          path: |
+            ${{ runner.temp }}/direct-channel/*.pkg
+            ${{ runner.temp }}/direct-channel/SHA256.txt
+          if-no-files-found: error
+          retention-days: 30
