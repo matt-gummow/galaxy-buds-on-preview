@@ -183,7 +183,12 @@ static void exerciseTransport() {
         fixture.connectionHandle++;
         check([client requestBudsOnHandoff:peer ticket:ticket] != 0 && !side.open && side.writes.count == 0,
               "connection handle changed but target was still eligible");
+        check([client prepareBudsOnHandoff:peer ticket:&ticket] != 0,
+              "changed handle allowed preparation without a fresh diagnostic connection");
 
+        [client disconnect];
+        client = connect(services);
+        main = fixture.opened[0];
         check([client prepareBudsOnHandoff:peer ticket:&ticket] == 0, "could not prepare new connection");
         side = fixture.opened.lastObject;
         [NSThread sleepForTimeInterval:3.1];

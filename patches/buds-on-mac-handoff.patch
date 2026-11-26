@@ -307,7 +307,7 @@ index 9d32632..6a7b741 100644
  - (void)setOnChannelClosed:(Bt_OnChannelClosed)callback;
  
 diff --git a/GalaxyBudsClient.Platform.OSX/Native/src/Bluetooth.mm b/GalaxyBudsClient.Platform.OSX/Native/src/Bluetooth.mm
-index abf3011..9e1b683 100644
+index abf3011..61cf632 100644
 --- a/GalaxyBudsClient.Platform.OSX/Native/src/Bluetooth.mm
 +++ b/GalaxyBudsClient.Platform.OSX/Native/src/Bluetooth.mm
 @@ -11,6 +11,8 @@
@@ -319,7 +319,7 @@ index abf3011..9e1b683 100644
  
  static void FreeEnumerationDevices(EnumerationResult *result, int initializedCount) {
      if (result == NULL || result->devices == NULL) {
-@@ -27,10 +29,91 @@ static void FreeEnumerationDevices(EnumerationResult *result, int initializedCou
+@@ -27,10 +29,92 @@ static void FreeEnumerationDevices(EnumerationResult *result, int initializedCou
      result->length = 0;
  }
  
@@ -405,13 +405,14 @@ index abf3011..9e1b683 100644
      uint64_t _diagnosticStamp;
      uint64_t _lastTestStamp;
 +    uint64_t _handoffPrimaryStamp;
++    BluetoothConnectionHandle _handoffPrimaryHandle;
 +    BOOL _handoffSdpFresh;
 +    uint64_t _handoffTicketCounter;
 +    BudsOnHandoffSession *_handoff;
      Bt_OnChannelData _onChannelData;
      Bt_OnChannelClosed _onChannelClosed;
      BOOL _channelClosedSignalled;
-@@ -156,11 +239,13 @@ static void ReportSdpServices(IOBluetoothDevice *device, bool fresh, Bt_OnDiagno
+@@ -156,11 +240,13 @@ static void ReportSdpServices(IOBluetoothDevice *device, bool fresh, Bt_OnDiagno
          }
      }
  
@@ -426,18 +427,19 @@ index abf3011..9e1b683 100644
      }
  
      IOBluetoothSDPServiceRecord *serviceRecord = [device getServiceRecordForUUID:parsedUuid];
-@@ -250,6 +335,10 @@ static void ReportSdpServices(IOBluetoothDevice *device, bool fresh, Bt_OnDiagno
+@@ -250,6 +336,11 @@ static void ReportSdpServices(IOBluetoothDevice *device, bool fresh, Bt_OnDiagno
                      return BT_CONN_EOPEN;
  
                  _macAddress = [[NSString alloc] initWithString:mac];
 +                if (memcmp(uuid, SppNewUuid, sizeof(SppNewUuid)) == 0) {
 +                    _handoffPrimaryStamp = _diagnosticStamp;
++                    _handoffPrimaryHandle = device.connectionHandle;
 +                    _handoffSdpFresh = freshServices;
 +                }
                  NSData *earlyData = _openingDiagnosticSource == tempRFCOMMChannel
                      ? _openingDiagnosticData : nil;
                  [self clearOpeningDiagnosticData];
-@@ -286,16 +375,24 @@ static void ReportSdpServices(IOBluetoothDevice *device, bool fresh, Bt_OnDiagno
+@@ -286,16 +377,25 @@ static void ReportSdpServices(IOBluetoothDevice *device, bool fresh, Bt_OnDiagno
      // mRFCOMMChannel is also read by sendData on another thread; swap it out
      // under the lock so in-flight sends keep a valid (closed) channel object.
      IOBluetoothRFCOMMChannel *channel;
@@ -448,6 +450,7 @@ index abf3011..9e1b683 100644
          channel = mRFCOMMChannel;
          mRFCOMMChannel = nil;
 +        _handoffPrimaryStamp = 0;
++        _handoffPrimaryHandle = kBluetoothConnectionHandleNone;
 +        _handoffSdpFresh = NO;
 +        handoff = _handoff;
 +        if (handoff)
@@ -462,7 +465,7 @@ index abf3011..9e1b683 100644
      if (channel != nil) {
          // This will close the RFCOMM channel and start an inactivity timer to close the baseband connection if no
          // other channels (L2CAP or RFCOMM) are open.
-@@ -303,8 +400,6 @@ static void ReportSdpServices(IOBluetoothDevice *device, bool fresh, Bt_OnDiagno
+@@ -303,8 +403,6 @@ static void ReportSdpServices(IOBluetoothDevice *device, bool fresh, Bt_OnDiagno
          [channel closeChannel];
      }
  
@@ -471,7 +474,7 @@ index abf3011..9e1b683 100644
      return TRUE;
  }
  
-@@ -495,6 +590,202 @@ static void ReportSdpServices(IOBluetoothDevice *device, bool fresh, Bt_OnDiagno
+@@ -495,6 +593,202 @@ static void ReportSdpServices(IOBluetoothDevice *device, bool fresh, Bt_OnDiagno
      return [self sendBudsOnTestFrame:stamp data:frame->bytes.data() length:frame->length];
  }
  
@@ -555,7 +558,7 @@ index abf3011..9e1b683 100644
 +            session->primary = mRFCOMMChannel;
 +            device = [session->primary getDevice];
 +            session->primaryStamp = _handoffPrimaryStamp;
-+            session->handle = device.connectionHandle;
++            session->handle = _handoffPrimaryHandle;
 +            _handoff = session;
 +            if (![self handoffPrimaryIsCurrent:session expectedMac:expectedMac]) {
 +                _handoff = nil;
