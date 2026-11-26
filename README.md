@@ -4,7 +4,7 @@ This repository builds an Apple Silicon version of [GalaxyBudsClient](https://gi
 
 ## Install
 
-Open the latest successful [macOS build](https://github.com/matt-gummow/galaxy-buds-on-preview/actions). Download **GalaxyBudsOn-diagnostic-macos-arm64** under Artifacts, unzip it, and open the included `.pkg`. macOS may ask you to approve this unsigned installer. The build runs in GitHub Actions and requires no local Xcode or App Store sign-in.
+The [hardware-checked Apple Silicon build](https://github.com/matt-gummow/galaxy-buds-on-preview/actions/runs/45736098878/artifacts/15079720347) is the current baseline. It confirmed an EQ change on SM-U600 and read the new preset again after reconnecting. Download the artifact, unzip it, and open the included `.pkg`. If the artifact expires, use the workflow for [the baseline build](https://github.com/matt-gummow/galaxy-buds-on-preview/actions/runs/45736098878) as the build reference. macOS may ask you to approve this unsigned installer. The build runs in GitHub Actions and requires no local Xcode or App Store sign-in.
 
 The workflow checks out upstream commit `85dfc8bb39fc45d3c30ecf71ab2c663fb1d41729`, applies `add_buds_on.py`, and builds the native Bluetooth library and app with the pinned cloud toolchain.
 
@@ -25,7 +25,7 @@ Volume hold changes only the selected earbud and preserves the other side. This 
 
 Open **Settings → Copy Buds On connection report** after connecting or attempting a connection. The same report is saved to `~/Library/Application Support/GalaxyBudsClient/buds-on-connection-report.txt`. It omits Bluetooth addresses and packet dumps.
 
-The report summarizes complete 8-byte `0x76` multipoint notices. It includes the firmware’s support flag, connection state, audio focus, and known streaming profiles. The final three unverified payload bytes are omitted. A hardware report from SM-U600 showed revision 2, support enabled, and the multiple-device state, with media and hands-free profile activity. These fields do not identify the two hosts. Use a Mac audio and Galaxy call handoff to check whether both hosts stay connected. Samsung currently documents Auto Switch for compatible Galaxy devices and Windows PCs running Galaxy Connect.
+The report summarizes complete 8-byte `0x76` multipoint notices. It includes the firmware’s support flag, connection state, audio focus, and known streaming profiles. The final three unverified payload bytes are omitted. An earlier SM-U600 report showed the firmware support flag and a multiple-device state. The subsequent simultaneous Galaxy phone and Mac connection attempt failed. That report showed a one-device state with the support flag still set. The current preview supports using one of those audio hosts at a time. Samsung documents Auto Switch for compatible Galaxy devices and Windows PCs running Galaxy Connect. [Samsung Galaxy Buds On](https://www.samsung.com/us/audio-sound/galaxy-buds-on/)
 
 SM-U600 disables the generic multipoint capability in Samsung’s app profile. The [upstream MDE patch](https://github.com/timschneeb/GalaxyBudsClient/pull/729) is disabled for this model. Factory reset, firmware operations, and generic configuration writes are also disabled.
 
@@ -37,4 +37,4 @@ Analysis used Samsung’s [Galaxy Buds 9.0.10.1724 APK](https://www.apkmirror.co
 - Standard EQ is set with `0x86` and a preset code from 0 to 5. The `0x69` read request accepts a validated six- or seven-row, nine-band reply and displays the last row as Custom.
 - The high and low nibbles of byte 11 hold the left and right hold options. The `0x92` command uses both sides, with 0 for Off and 6 for Volume. Other options and assistant subtype writes are disabled.
 - The two experimental audio options use `0x85` for Gaming mode (status byte 8) and `0x6C` for Pause when one earbud is removed (status byte 46). Both are binary.
-- Native and managed fixtures verify command bytes, checksums, allowed values, preservation of sibling controls, fresh status, and selected-device guards. The new hold controls, audio options, curve reading, and reconnect behavior still need physical testing on this build.
+- Native and managed fixtures verify command bytes, checksums, allowed values, preservation of sibling controls, fresh status, and selected-device guards. Per-earbud volume hold, the two experimental audio options, and Custom EQ curve reading still need dedicated hardware validation.
