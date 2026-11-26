@@ -17,7 +17,7 @@ The workflow checks out upstream commit `85dfc8bb39fc45d3c30ecf71ab2c663fb1d4172
 | **Equalizer** | Six standard presets from Balanced through Treble boost. Preset writes passed a hardware test in the previous preview. A Custom curve can be read from the device when it returns a supported reply. Custom curve editing remains disabled. |
 | **Settings** | Experimental Gaming mode and Pause when one earbud is removed, a reversible read-only mode for the running app, and the connection report. |
 
-Pair the earbuds in macOS Bluetooth first and connect in GalaxyBudsClient. Changes are explicit actions on the selected device. The app checks the current status and can refresh the management channel to verify a change. It sends each setting command once and never retries a write automatically.
+Pair the earbuds in macOS Bluetooth first and connect in GalaxyBudsClient. Changes are explicit actions on the selected device. The app checks recent status before sending a change. A matching EQ reply updates the preset without reconnecting. If the earbuds only acknowledge a touch command, select **Refresh status** to check the result. Last reported values stay visible during a management reconnect, and they do not authorize writes. The app sends each setting command once.
 
 Volume hold changes only the selected earbud and preserves the other side. This build supports the Off and Volume values. Actions assigned to an assistant or another behavior require using the phone. A mixed media control state is displayed as unavailable for editing. Active Custom EQ is protected from replacement.
 
@@ -25,7 +25,7 @@ Volume hold changes only the selected earbud and preserves the other side. This 
 
 Open **Settings → Copy Buds On connection report** after connecting or attempting a connection. The same report is saved to `~/Library/Application Support/GalaxyBudsClient/buds-on-connection-report.txt`. It omits Bluetooth addresses and packet dumps.
 
-The report summarizes complete 8-byte `0x76` multipoint notices. It includes the firmware’s support flag, connection state, audio focus, and known streaming profiles. The final three unverified payload bytes are omitted. Those status fields cannot establish simultaneous audio connections to a specific pair of hosts by themselves. Samsung currently documents Auto Switch for compatible Galaxy devices and Windows PCs running Galaxy Connect.
+The report summarizes complete 8-byte `0x76` multipoint notices. It includes the firmware’s support flag, connection state, audio focus, and known streaming profiles. The final three unverified payload bytes are omitted. A hardware report from SM-U600 showed revision 2, support enabled, and the multiple-device state, with media and hands-free profile activity. These fields do not identify the two hosts. Use a Mac audio and Galaxy call handoff to check whether both hosts stay connected. Samsung currently documents Auto Switch for compatible Galaxy devices and Windows PCs running Galaxy Connect.
 
 SM-U600 disables the generic multipoint capability in Samsung’s app profile. The [upstream MDE patch](https://github.com/timschneeb/GalaxyBudsClient/pull/729) is disabled for this model. Factory reset, firmware operations, and generic configuration writes are also disabled.
 
