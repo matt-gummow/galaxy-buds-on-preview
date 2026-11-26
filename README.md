@@ -20,6 +20,8 @@ On the experimental branch, **Settings → Experimental audio handoff** can open
 
 The experiment sends only the observed audio request, after explicit confirmation, and closes its temporary channel. Read-only diagnostics disables it. Firmware operations and the Book's unverified settings and version writes remain blocked.
 
+A [direct control-channel check for Apple Silicon](https://github.com/matt-gummow/galaxy-buds-on-preview/actions/runs/45898081195/artifacts/15154971199) is available as a separate diagnostic. Its [cloud build](https://github.com/matt-gummow/galaxy-buds-on-preview/actions/runs/45898081195) passed the simulated transport/UI tests and installer verification. It opens the cached Samsung control service directly, with no earbud application writes, to check whether Fold playback continues without first connecting through GalaxyBudsClient. This requires one listener observation. The [instructions and source](https://github.com/matt-gummow/galaxy-buds-on-preview/tree/experimental/buds-on-mac-handoff/diagnostics/direct-channel) describe the test and its limits.
+
 ## Using the app
 
 | Page | Buds On support |
