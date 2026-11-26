@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Buds On recognition, diagnostics and one-shot touch and equalizer tests.
+"""Galaxy Buds On support for GalaxyBudsClient on macOS.
 
 Usage: python3 add_buds_on.py /path/to/GalaxyBudsClient
 Targets upstream commit 85dfc8bb39fc45d3c30ecf71ab2c663fb1d41729.
-Includes explicitly confirmed one-shot settings tests on macOS.
+Uses guarded settings commands and passive model-specific diagnostics.
 """
 from pathlib import Path
 import sys
@@ -68,7 +68,7 @@ namespace GalaxyBudsClient.Model.Specifications;
 
 /// <summary>
 /// EXPERIMENTAL SM-U600 (Galaxy Buds On) profile.
-/// The settings tests use the dedicated macOS diagnostic transport.
+/// Model-specific settings use the dedicated macOS management transport.
 /// Standard SPP decoding and the generic send paths are blocked for this model.
 /// </summary>
 public class BudsOnDeviceSpec : IDeviceSpec
@@ -93,7 +93,7 @@ bluetooth = 'GalaxyBudsClient/Platform/BluetoothImpl.cs'
 replace_once(bluetooth,
     '    public async Task SendAsync(SppMessage msg)\n    {\n',
     '    public async Task SendAsync(SppMessage msg)\n    {\n'
-    '        // The generic encoder never sends commands to SM-U600.\n'
+    '        // SM-U600 configuration uses the guarded device-specific writers below.\n'
     '        if (CurrentModel == Models.BudsOn)\n'
     '        {\n'
     '            Log.Warning("Buds On preview: outgoing SPP command blocked");\n'
@@ -237,6 +237,7 @@ write_once('GalaxyBudsClient/Platform/BudsOnFrameProbe.cs', '''using System;
 using System.Collections.Generic;
 using GalaxyBudsClient.Message;
 using GalaxyBudsClient.Utils;
+using static GalaxyBudsClient.Message.Decoder.MultipointInfoDecoder;
 
 namespace GalaxyBudsClient.Platform;
 
@@ -249,23 +250,59 @@ internal sealed class BudsOnFrameProbe
     private const int MaximumBodyLength = 0x03ff;
     private const int MaximumSignatures = 32;
     private const int MaximumSettingsObservations = 32;
+    private const int MaximumMultipointObservations = 24;
+    private const int BudsOnMultipointPayloadLength = 8;
+    private const StreamingMaskFlags KnownStreamingProfiles = StreamingMaskFlags.A2dpMusicNotCall |
+        StreamingMaskFlags.HfpCall | StreamingMaskFlags.CisMusicNotCall |
+        StreamingMaskFlags.Bis | StreamingMaskFlags.CisCall;
+
+    private static readonly (StreamingMaskFlags Flag, string Label)[] StreamingProfiles =
+    [
+        (StreamingMaskFlags.A2dpMusicNotCall, "A2DP media"),
+        (StreamingMaskFlags.HfpCall, "HFP call"),
+        (StreamingMaskFlags.CisMusicNotCall, "CIS media"),
+        (StreamingMaskFlags.Bis, "BIS"),
+        (StreamingMaskFlags.CisCall, "CIS call")
+    ];
     private const int EqualizerOffset = 9;
     private const int GestureFlagsOffset = 10;
     private const int CallDoubleTapBit = 4;
     private const int CallHoldBit = 5;
     private const int HoldStatusOffset = 11;
+    private const int GamingModeOffset = 8;
+    private const int PauseOnRemovalOffset = 46;
     private const byte MediaControlsMask = 0x4E;
 
-    private readonly record struct SettingsSnapshot(byte EqualizerCode, byte GestureFlags,
-        byte LeftHoldStatus, byte RightHoldStatus);
+    internal readonly record struct SettingsSnapshot(byte EqualizerCode, byte GestureFlags,
+        byte LeftHoldStatus, byte RightHoldStatus, byte GamingMode, byte PauseOnRemoval);
+
+    internal readonly record struct ControlStatus(long Frame, SettingsSnapshot Settings)
+    {
+        public byte Flags => Settings.GestureFlags;
+        public byte Preset => Settings.EqualizerCode;
+    }
+
+    private readonly record struct MultipointSnapshot(byte Revision, bool? Supported,
+        bool? OneDevice, bool? BackgroundFocus, StreamingMaskFlags Profiles, bool UnknownProfileBits);
+
+    private readonly record struct MultipointObservation(long Connection, long FirstFrame,
+        long LastFrame, long Count, MultipointSnapshot Snapshot);
 
     private readonly byte[] _pending = new byte[MaximumBodyLength + 4];
     private readonly Dictionary<(byte Id, int PayloadLength), long> _signatures = new();
     private readonly Queue<(long Connection, long Frame, SettingsSnapshot Settings)> _settingsObservations = new();
+    private readonly LinkedList<MultipointObservation> _multipointObservations = new();
+    private long _multipointFrames;
+    private long _multipointSessionFrames;
     private bool _observeSettings;
     private long _settingsConnection;
     private SettingsSnapshot? _lastSettings;
-    public (long Frame, byte Flags, byte Preset)? LatestControlStatus { get; private set; }
+    public ControlStatus? LatestControlStatus { get; private set; }
+    public SettingsSnapshot? LastSettings => _lastSettings;
+    public (long Frame, byte Value)? GamingModeAck { get; private set; }
+    public (long Frame, byte Value)? PauseOnRemovalAck { get; private set; }
+    public (long Frame, byte Left, byte Right)? HoldAck { get; private set; }
+    public (long Frame, sbyte[] Custom)? EqualizerCurves { get; private set; }
     public (long Frame, byte Preset)? EqualizerCommandAck { get; private set; }
     public byte? EqualizerPreset => _lastSettings is { EqualizerCode: <= 6 } settings
         ? settings.EqualizerCode
@@ -285,14 +322,21 @@ internal sealed class BudsOnFrameProbe
         _basicStatus = default;
         _extendedStatus = default;
         _observeSettings = observeSettings;
+        _multipointSessionFrames = 0;
         _lastSettings = null;
         LatestControlStatus = null;
         CallCommandAckFrame = 0;
         EqualizerCommandAck = null;
+        GamingModeAck = null;
+        PauseOnRemovalAck = null;
+        HoldAck = null;
+        EqualizerCurves = null;
 
         if (newSettingsDevice)
         {
             _settingsObservations.Clear();
+            _multipointObservations.Clear();
+            _multipointFrames = 0;
             _settingsConnection = 0;
         }
 
@@ -383,13 +427,28 @@ internal sealed class BudsOnFrameProbe
         }
 
         var payload = _pending.AsSpan(4, payloadLength);
+        if (_observeSettings && id == (byte)MsgIds.MULTIPOINT_INFO &&
+            payloadLength == BudsOnMultipointPayloadLength)
+            RecordMultipointStatus(payload);
         if (_observeSettings && id == 0x42 && payload.Length > 0)
         {
             if (payload[0] == 0x90)
                 CallCommandAckFrame = _validFrames;
-            if (payload[0] == 0x86 && payload.Length >= 2 && payload[1] <= 5)
-                EqualizerCommandAck = (_validFrames, payload[1]);
+            if (payload.Length >= 2)
+            {
+                if (payload[0] == 0x86 && payload[1] <= 5)
+                    EqualizerCommandAck = (_validFrames, payload[1]);
+                if (payload[0] == 0x85 && payload[1] <= 1)
+                    GamingModeAck = (_validFrames, payload[1]);
+                if (payload[0] == 0x6C && payload[1] <= 1)
+                    PauseOnRemovalAck = (_validFrames, payload[1]);
+            }
+            if (payload.Length >= 5 && payload[0] == 0x92 && payload[1] is (0 or 6) &&
+                payload[2] is (0 or 6) && payload[3] == 0 && payload[4] == 0)
+                HoldAck = (_validFrames, payload[1], payload[2]);
         }
+        if (_observeSettings && id == 0x69)
+            RecordEqualizerCurves(payload);
         if (id == (byte)MsgIds.STATUS_UPDATED && payloadLength >= 7)
             RecordBatteryCandidate(payload, batteryOffset: 1, ref _basicStatus);
         if (id == (byte)MsgIds.EXTENDED_STATUS_UPDATED)
@@ -401,16 +460,64 @@ internal sealed class BudsOnFrameProbe
         }
     }
 
+    private void RecordMultipointStatus(ReadOnlySpan<byte> payload)
+    {
+        // Samsung's Able handler reads five fields. The final three bytes are unverified.
+        var flags = (StreamingMaskFlags)payload[4];
+        var snapshot = new MultipointSnapshot(payload[0], ReadBinaryField(payload[1]),
+            ReadBinaryField(payload[2]), ReadBinaryField(payload[3]),
+            flags & KnownStreamingProfiles, (flags & ~KnownStreamingProfiles) != 0);
+        _multipointFrames++;
+        _multipointSessionFrames++;
+
+        if (_multipointObservations.Last is { } last && last.Value.Connection == _settingsConnection &&
+            last.Value.Snapshot == snapshot)
+        {
+            last.Value = last.Value with { LastFrame = _validFrames, Count = last.Value.Count + 1 };
+            return;
+        }
+
+        if (_multipointObservations.Count == MaximumMultipointObservations)
+            _multipointObservations.RemoveFirst();
+        _multipointObservations.AddLast(new MultipointObservation(
+            _settingsConnection, _validFrames, _validFrames, 1, snapshot));
+    }
+
+    private static bool? ReadBinaryField(byte value) => value switch
+    {
+        0 => false,
+        1 => true,
+        _ => null
+    };
+
+    private void RecordEqualizerCurves(ReadOnlySpan<byte> payload)
+    {
+        const int bandCount = 9;
+        if (payload.Length < 2 || payload[0] is not (6 or 7) || payload[1] != bandCount ||
+            payload.Length != 2 + payload[0] * bandCount)
+            return;
+
+        foreach (var value in payload[2..])
+            if (unchecked((sbyte)value) is < -10 or > 10)
+                return;
+
+        var custom = new sbyte[bandCount];
+        var customRow = payload[^bandCount..];
+        for (var i = 0; i < custom.Length; i++)
+            custom[i] = unchecked((sbyte)customRow[i]);
+        EqualizerCurves = (_validFrames, custom);
+    }
+
     private void RecordSettingsCandidate(ReadOnlySpan<byte> payload)
     {
         if (!_observeSettings)
             return;
 
-        LatestControlStatus = (_validFrames, payload[GestureFlagsOffset], payload[EqualizerOffset]);
         var assignments = payload[HoldStatusOffset];
-        var settings = new SettingsSnapshot(payload[EqualizerOffset],
-            payload[GestureFlagsOffset],
-            (byte)(assignments >> 4), (byte)(assignments & 0x0F));
+        var settings = new SettingsSnapshot(payload[EqualizerOffset], payload[GestureFlagsOffset],
+            (byte)(assignments >> 4), (byte)(assignments & 0x0F),
+            payload[GamingModeOffset], payload[PauseOnRemovalOffset]);
+        LatestControlStatus = new ControlStatus(_validFrames, settings);
         if (_lastSettings == settings)
             return;
 
@@ -436,19 +543,14 @@ internal sealed class BudsOnFrameProbe
         return true;
     }
 
-    public (bool AnswerOrEnd, bool Decline)? GetCallControls() =>
-        _lastSettings is { } settings
-            ? (IsFlagSet(settings.GestureFlags, CallDoubleTapBit), IsFlagSet(settings.GestureFlags, CallHoldBit))
-            : null;
-
-    public (int? Earbuds, int? Case) GetBattery()
+    public (int? Left, int? Right, int? Case) GetBattery()
     {
         if (_extendedStatus.Count < 2)
-            return (null, null);
+            return (null, null, null);
 
         var (_, left, right, caseBattery) = _extendedStatus;
-        int? earbuds = left <= 100 && right <= 100 ? Math.Min(left, right) : null;
-        return (earbuds, caseBattery <= 100 ? caseBattery : null);
+        return (left <= 100 ? left : null, right <= 100 ? right : null,
+            caseBattery <= 100 ? caseBattery : null);
     }
 
     public IEnumerable<string> SnapshotLines()
@@ -466,6 +568,48 @@ internal sealed class BudsOnFrameProbe
             yield return "Buds On settings observations (extended status 0x61)";
         foreach (var (connection, frame, settings) in _settingsObservations)
             yield return $"  Connection {connection}, valid frame {frame} | {FormatSettings(settings)}";
+        if (_multipointFrames > 0 || _observeSettings)
+        {
+            yield return $"Buds On multipoint status (0x76, complete 8-byte payloads): {_multipointFrames} frame(s)";
+            yield return _observeSettings
+                ? $"  Current connection {_settingsConnection}: {_multipointSessionFrames} frame(s)"
+                : "  No current Buds On receive session";
+            foreach (var (connection, firstFrame, lastFrame, count, snapshot) in _multipointObservations)
+            {
+                var frameRange = firstFrame == lastFrame ? $"{firstFrame}" : $"{firstFrame}–{lastFrame}";
+                yield return $"  Connection {connection}, valid frame(s) {frameRange} | " +
+                    $"{count} matching sample(s) | {FormatMultipointStatus(snapshot)}";
+            }
+        }
+    }
+
+    private static string FormatMultipointStatus(MultipointSnapshot snapshot)
+    {
+        var support = snapshot.Supported switch { true => "yes", false => "no", null => "unknown" };
+        var connection = snapshot.OneDevice switch
+        {
+            true => "one-device state",
+            false => "multiple-device state",
+            null => "unknown"
+        };
+        var focus = snapshot.BackgroundFocus switch
+        {
+            true => "background",
+            false => "foreground",
+            null => "unknown"
+        };
+        var profiles = new List<string>();
+        foreach (var (flag, label) in StreamingProfiles)
+        {
+            if ((snapshot.Profiles & flag) != 0)
+                profiles.Add(label);
+        }
+        if (snapshot.UnknownProfileBits)
+            profiles.Add("unrecognized profile bits");
+
+        var streams = profiles.Count == 0 ? "none" : string.Join(", ", profiles);
+        return $"Revision {snapshot.Revision} | Device-reported support {support} | " +
+            $"Connection state {connection} | Audio focus {focus} | Streams {streams}";
     }
 
     private static string FormatSettings(SettingsSnapshot settings)
@@ -474,8 +618,16 @@ internal sealed class BudsOnFrameProbe
         return $"EQ code {settings.EqualizerCode} | Hold status nibbles L={settings.LeftHoldStatus} R={settings.RightHoldStatus} | " +
             $"Media controls {DescribeMediaControls(flags)} | Tap {FormatFlag(flags, 3)}, double {FormatFlag(flags, 2)}, " +
             $"triple {FormatFlag(flags, 1)}, media hold {FormatFlag(flags, 6)} | " +
-            $"Call double {FormatFlag(flags, CallDoubleTapBit)}, call hold {FormatFlag(flags, CallHoldBit)}";
+            $"Call double {FormatFlag(flags, CallDoubleTapBit)}, call hold {FormatFlag(flags, CallHoldBit)} | " +
+            $"Gaming mode {DescribeBinary(settings.GamingMode)}, pause on removal {DescribeBinary(settings.PauseOnRemoval)}";
     }
+
+    private static string DescribeBinary(byte value) => value switch
+    {
+        0 => "off",
+        1 => "on",
+        _ => "unknown"
+    };
 
     private static string DescribeMediaControls(byte flags) => (flags & MediaControlsMask) switch
     {
@@ -610,6 +762,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using GalaxyBudsClient.Model.Config;
+using GalaxyBudsClient.Model.Constants;
 
 namespace GalaxyBudsClient.Platform;
 
@@ -629,21 +782,24 @@ internal static class BudsOnDiagnostics
     private static long _receiveSession;
     private static ulong _receiveStamp;
     private static long _statusObservedAt;
-    private static long _attemptedStatusFrame;
     private static long _attemptedEqualizerStatusFrame;
     private static ulong _attemptedSettingsStamp;
+    private static readonly Dictionary<byte, long> AttemptedOptionFrames = new();
 
-    internal enum CallControl : byte
+    internal enum Option
     {
-        AnswerOrEnd = 0x10,
-        Decline = 0x20,
-        DeclineAndMedia = Decline | 0x4E
+        AnswerOrEnd,
+        Decline,
+        Media,
+        LeftHoldVolume,
+        RightHoldVolume,
+        GamingMode,
+        PauseOnRemoval
     }
 
-    internal readonly record struct CallSample(long Session, long Frame, byte Flags)
-    {
-        public bool IsOn(CallControl control) => (Flags & (byte)control) == (byte)control;
-    }
+    internal readonly record struct OptionSample(long Session, bool CurrentValue, byte Flags, byte UnchangedHold);
+    internal readonly record struct OptionWrite(ulong Stamp, long Session, long ReplyBarrier, byte Flags,
+        byte Value, byte Sibling, byte UnchangedHold, byte Opcode, byte Mask);
 
     internal readonly record struct EqualizerSample(long Session, long Frame, byte Preset);
 
@@ -667,7 +823,7 @@ internal static class BudsOnDiagnostics
 
     // Call and EQ writes change different fields. Each may consume a fresh status once.
     // The native transport also requires a new receive stamp between any two writes.
-    private static (long Frame, byte Flags, byte Preset)? GetFreshTestStatus(Device device)
+    private static BudsOnFrameProbe.ControlStatus? GetFreshTestStatus(Device device)
     {
         if (!ReferenceEquals(_receiveDevice, device) || _receiveStamp == 0 || _receiveStamp == _attemptedSettingsStamp ||
             FrameProbe.HasPartialFrame || Stopwatch.GetElapsedTime(_statusObservedAt) > TimeSpan.FromSeconds(60))
@@ -722,55 +878,170 @@ internal static class BudsOnDiagnostics
         }
     }
 
-    public static CallSample? GetCallTestSample(Device device)
+    private static byte OptionCommand(Option option) => option switch
+    {
+        Option.AnswerOrEnd or Option.Decline or Option.Media => 0x90,
+        Option.LeftHoldVolume or Option.RightHoldVolume => 0x92,
+        Option.GamingMode => 0x85,
+        Option.PauseOnRemoval => 0x6C,
+        _ => 0
+    };
+
+    private static byte GestureMask(Option option) => option switch
+    {
+        Option.AnswerOrEnd => 0x10,
+        Option.Decline => 0x20,
+        Option.Media => 0x4E,
+        _ => 0
+    };
+
+    private static bool? ReadBinary(byte value) => value switch { 0 => false, 1 => true, _ => null };
+
+    private static bool? ReadHold(byte value) => value switch { 0 => false, 6 => true, _ => null };
+
+    private static byte HoldSibling(BudsOnFrameProbe.SettingsSnapshot status, Option option) => option switch
+    {
+        Option.LeftHoldVolume => status.RightHoldStatus,
+        Option.RightHoldVolume => status.LeftHoldStatus,
+        _ => 0
+    };
+
+    private static bool? ReadOption(BudsOnFrameProbe.SettingsSnapshot status, Option option) => option switch
+    {
+        Option.AnswerOrEnd => (status.GestureFlags & 0x10) != 0,
+        Option.Decline => (status.GestureFlags & 0x20) != 0,
+        Option.Media => (status.GestureFlags & 0x4E) switch { 0 => false, 0x4E => true, _ => null },
+        Option.LeftHoldVolume when ReadHold(status.RightHoldStatus) != null => ReadHold(status.LeftHoldStatus),
+        Option.RightHoldVolume when ReadHold(status.LeftHoldStatus) != null => ReadHold(status.RightHoldStatus),
+        Option.GamingMode => ReadBinary(status.GamingMode),
+        Option.PauseOnRemoval => ReadBinary(status.PauseOnRemoval),
+        _ => null
+    };
+
+    public static bool? GetControlValue(Device device, Option option)
     {
         lock (Sync)
-        {
-            if (GetFreshTestStatus(device) is not { } status || status.Frame == _attemptedStatusFrame)
-                return null;
-
-            return new CallSample(_receiveSession, status.Frame, status.Flags);
-        }
-    }
-
-    public static (ulong Stamp, CallSample Sample, long ReplyBarrier)? TakeCallTestSample(Device device, CallSample expected)
-    {
-        lock (Sync)
-        {
-            if (GetCallTestSample(device) is not { } current || current.Session != expected.Session ||
-                current.Flags != expected.Flags)
-                return null;
-
-            _attemptedStatusFrame = current.Frame;
-            _attemptedSettingsStamp = _receiveStamp;
-            return (_receiveStamp, current, FrameProbe.LastFrame);
-        }
-    }
-
-    public static (byte? Flags, bool Acknowledged)? GetCallTestReadback(Device device, long session, long replyBarrier)
-    {
-        lock (Sync)
-        {
-            if (!ReferenceEquals(_receiveDevice, device) || _receiveSession != session)
-                return null;
-
-            var newer = FrameProbe.LatestControlStatus is { } status && status.Frame > replyBarrier
-                ? (byte?)status.Flags
+            return ReferenceEquals(_receiveDevice, device) && FrameProbe.LastSettings is { } status
+                ? ReadOption(status, option)
                 : null;
-            return (newer, FrameProbe.CallCommandAckFrame > replyBarrier);
+    }
+
+    public static OptionSample? GetOptionSample(Device device, Option option)
+    {
+        lock (Sync)
+        {
+            var opcode = OptionCommand(option);
+            if (opcode == 0 || GetFreshTestStatus(device) is not { } status ||
+                AttemptedOptionFrames.GetValueOrDefault(opcode) == status.Frame ||
+                ReadOption(status.Settings, option) is not bool value)
+                return null;
+
+            return new OptionSample(_receiveSession, value, status.Flags, HoldSibling(status.Settings, option));
         }
     }
 
-    public static (int? Earbuds, int? Case) GetBattery(Device device)
+    public static OptionWrite? PrepareOption(Option option, OptionSample sample, bool desired)
     {
-        lock (Sync)
-            return ReferenceEquals(_receiveDevice, device) ? FrameProbe.GetBattery() : (null, null);
+        var opcode = OptionCommand(option);
+        if (opcode == 0 || desired == sample.CurrentValue)
+            return null;
+        var value = desired ? (byte)1 : (byte)0;
+        var right = (byte)0;
+        if (opcode == 0x92)
+        {
+            var target = desired ? (byte)6 : (byte)0;
+            value = option == Option.LeftHoldVolume ? target : sample.UnchangedHold;
+            right = option == Option.RightHoldVolume ? target : sample.UnchangedHold;
+        }
+
+        return new OptionWrite(0, sample.Session, 0, sample.Flags, value, right, sample.UnchangedHold,
+            opcode, GestureMask(option));
     }
 
-    public static (bool AnswerOrEnd, bool Decline)? GetCallControls(Device device)
+    public static OptionWrite? TakeOptionSample(Device device, Option option, bool desired, OptionSample expected)
     {
         lock (Sync)
-            return ReferenceEquals(_receiveDevice, device) ? FrameProbe.GetCallControls() : null;
+        {
+            if (GetOptionSample(device, option) is not { } sample || sample.Session != expected.Session ||
+                sample.CurrentValue != expected.CurrentValue || sample.UnchangedHold != expected.UnchangedHold ||
+                (OptionCommand(option) == 0x90 && sample.Flags != expected.Flags) ||
+                PrepareOption(option, sample, desired) is not { } write ||
+                FrameProbe.LatestControlStatus is not { } status)
+                return null;
+
+            AttemptedOptionFrames[write.Opcode] = status.Frame;
+            _attemptedSettingsStamp = _receiveStamp;
+            return write with { Stamp = _receiveStamp, ReplyBarrier = FrameProbe.LastFrame };
+        }
+    }
+
+    public static (bool? Value, bool Acknowledged, bool OtherChanged)? GetOptionReadback(
+        Device device, Option option, OptionWrite write, bool freshConnection = false)
+    {
+        lock (Sync)
+        {
+            if (!ReferenceEquals(_receiveDevice, device) ||
+                (freshConnection ? _receiveSession == write.Session : _receiveSession != write.Session))
+                return null;
+
+            bool? value = null;
+            var otherChanged = false;
+            if (FrameProbe.LatestControlStatus is { } status && status.Frame > write.ReplyBarrier)
+            {
+                value = ReadOption(status.Settings, option);
+                if (write.Mask != 0)
+                    otherChanged = ((status.Flags ^ write.Flags) & ~write.Mask) != 0;
+                else if (write.Opcode == 0x92)
+                    otherChanged = HoldSibling(status.Settings, option) != write.UnchangedHold;
+            }
+
+            var acknowledged = write.Opcode switch
+            {
+                0x90 => FrameProbe.CallCommandAckFrame > write.ReplyBarrier,
+                0x85 => FrameProbe.GamingModeAck is { } gaming && gaming.Frame > write.ReplyBarrier &&
+                    gaming.Value == write.Value,
+                0x6C => FrameProbe.PauseOnRemovalAck is { } pause && pause.Frame > write.ReplyBarrier &&
+                    pause.Value == write.Value,
+                0x92 => FrameProbe.HoldAck is { } hold && hold.Frame > write.ReplyBarrier &&
+                    hold.Left == write.Value && hold.Right == write.Sibling,
+                _ => false
+            };
+            return (value, acknowledged, otherChanged);
+        }
+    }
+
+    public static bool HasFreshStatus(Device device)
+    {
+        lock (Sync)
+            return ReferenceEquals(_receiveDevice, device) && FrameProbe.LatestControlStatus != null &&
+                !FrameProbe.HasPartialFrame && Stopwatch.GetElapsedTime(_statusObservedAt) <= TimeSpan.FromSeconds(60);
+    }
+
+    public static (ulong Stamp, long Session, long ReplyBarrier)? TakeEqualizerCurvesRequest(Device device)
+    {
+        lock (Sync)
+        {
+            if (!ReferenceEquals(_receiveDevice, device) || _receiveStamp == 0 ||
+                _receiveStamp == _attemptedSettingsStamp || FrameProbe.HasPartialFrame ||
+                FrameProbe.LatestControlStatus == null)
+                return null;
+
+            _attemptedSettingsStamp = _receiveStamp;
+            return (_receiveStamp, _receiveSession, FrameProbe.LastFrame);
+        }
+    }
+
+    public static sbyte[]? GetEqualizerCurvesReadback(Device device, long session, long replyBarrier)
+    {
+        lock (Sync)
+            return ReferenceEquals(_receiveDevice, device) && _receiveSession == session &&
+                FrameProbe.EqualizerCurves is { } curves && curves.Frame > replyBarrier ? curves.Custom : null;
+    }
+
+    public static (int? Left, int? Right, int? Case) GetBattery(Device device)
+    {
+        lock (Sync)
+            return ReferenceEquals(_receiveDevice, device) ? FrameProbe.GetBattery() : (null, null, null);
     }
 
     public static void SetMacBattery(int? battery)
@@ -799,13 +1070,15 @@ internal static class BudsOnDiagnostics
     {
         lock (Sync)
         {
+            if (device?.Model != Models.BudsOn)
+                device = null;
             _receiveDevice = device;
             _receiveSession++;
             _receiveStamp = 0;
             _statusObservedAt = 0;
-            _attemptedStatusFrame = 0;
             _attemptedEqualizerStatusFrame = 0;
             _attemptedSettingsStamp = 0;
+            AttemptedOptionFrames.Clear();
             var newSettingsDevice = device != null && !ReferenceEquals(_settingsDevice, device);
             if (newSettingsDevice)
                 _settingsDevice = device;
@@ -818,7 +1091,7 @@ internal static class BudsOnDiagnostics
     {
         lock (Sync)
         {
-            if (!ReferenceEquals(_receiveDevice, device))
+            if (stamp == 0 || device?.Model != Models.BudsOn || !ReferenceEquals(_receiveDevice, device))
                 return;
             if (_receiveStamp != 0 && stamp != _receiveStamp + 1)
             {
@@ -827,7 +1100,10 @@ internal static class BudsOnDiagnostics
                 FrameProbe.ResetStream(observeSettings: device != null, newSettingsDevice: false);
                 _statusObservedAt = 0;
                 if (stamp != 0 && stamp <= _receiveStamp)
+                {
+                    ScheduleSave();
                     return;
+                }
             }
             _receiveStamp = stamp;
             _chunks++;
@@ -943,10 +1219,7 @@ replace_once(bluetooth,
 replace_once(bluetooth,
     '        /* Discard data if not properly registered */\n',
     '''        if (CurrentModel == Models.BudsOn)
-        {
-            BudsOnDiagnostics.RecordRx(null, frame);
             return;
-        }
 
         /* Discard data if not properly registered */
 ''')
@@ -954,7 +1227,32 @@ replace_once(bluetooth,
 settings_page = 'GalaxyBudsClient/Interface/Pages/SettingsPage.axaml'
 replace_once(settings_page,
     '            <ui:FASettingsExpander Header="{ext:Translate {x:Static i18N:Keys.SettingsMultipointHeader}}"',
-    '''            <Button Content="Copy Buds On connection report"
+    '''            <ui:FASettingsExpander x:Name="BudsOnAudioPanel" Header="Galaxy Buds On"
+                                   IsExpanded="True" IsVisible="False">
+                <StackPanel Spacing="8">
+                    <CheckBox x:Name="BudsOnReadOnlyToggle" Content="Read-only diagnostics"
+                              Click="OnBudsOnReadOnlyClicked" />
+                    <controls:SettingsGroup>
+                        <controls:SettingsSymbolItem Content="Gaming mode" Description="Experimental"
+                                                     Symbol="DeviceEq">
+                            <controls:SettingsSymbolItem.Footer>
+                                <Button x:Name="BudsOnGamingButton" Click="OnBudsOnGamingClicked" />
+                            </controls:SettingsSymbolItem.Footer>
+                        </controls:SettingsSymbolItem>
+                        <controls:SettingsSymbolItem Content="Pause when one earbud is removed"
+                                                     Description="Experimental" Symbol="VideoPlayPause">
+                            <controls:SettingsSymbolItem.Footer>
+                                <Button x:Name="BudsOnPauseButton" Click="OnBudsOnPauseClicked" />
+                            </controls:SettingsSymbolItem.Footer>
+                        </controls:SettingsSymbolItem>
+                    </controls:SettingsGroup>
+                    <TextBlock x:Name="BudsOnAudioResult" TextWrapping="Wrap" IsVisible="False" />
+                    <Button x:Name="BudsOnRefreshButton" Content="Refresh Buds On status"
+                            Click="OnBudsOnRefreshClicked" />
+                </StackPanel>
+            </ui:FASettingsExpander>
+
+            <Button Content="Copy Buds On connection report"
                     IsVisible="{x:Static platform:PlatformUtils.IsOSX}"
                     Click="OnCopyBudsOnReportClicked" />
 
@@ -962,7 +1260,9 @@ replace_once(settings_page,
 settings_code = 'GalaxyBudsClient/Interface/Pages/SettingsPage.axaml.cs'
 replace_once(settings_code,
     'using Avalonia.Interactivity;\n',
-    'using Avalonia.Controls;\nusing Avalonia.Input.Platform;\nusing Avalonia.Interactivity;\n')
+    'using System;\nusing System.Threading.Tasks;\nusing Avalonia.Controls;\nusing Avalonia.Input.Platform;\n'
+    'using Avalonia.Interactivity;\nusing Avalonia.Threading;\nusing GalaxyBudsClient.Model.Config;\n'
+    'using GalaxyBudsClient.Model.Constants;\n')
 replace_once(settings_code,
     '    public async void OnApplyMultipointClicked(object? sender, RoutedEventArgs e)\n',
     '''    public async void OnCopyBudsOnReportClicked(object? sender, RoutedEventArgs e)
@@ -981,6 +1281,108 @@ replace_once(settings_code,
 
     public async void OnApplyMultipointClicked(object? sender, RoutedEventArgs e)
 ''')
+
+replace_once(settings_code,
+    '        TrayIcon.AddHandler(SettingsSwitchItem.IsCheckedChangedEvent, OnIsTrayIconEnabledChanged);\n',
+    '''        TrayIcon.AddHandler(SettingsSwitchItem.IsCheckedChangedEvent, OnIsTrayIconEnabledChanged);
+        if (PlatformUtils.IsOSX)
+        {
+            _budsOnSettingsTimer.Tick += (_, _) => RefreshBudsOnAudioControls();
+            AttachedToVisualTree += (_, _) =>
+            {
+                RefreshBudsOnAudioControls();
+                _budsOnSettingsTimer.Start();
+            };
+            DetachedFromVisualTree += (_, _) => _budsOnSettingsTimer.Stop();
+        }
+''')
+replace_once(settings_code,
+    '    private void OnIsTrayIconEnabledChanged(object? sender, RoutedEventArgs e)\n',
+    '''    private readonly DispatcherTimer _budsOnSettingsTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private Device? _budsOnAudioDevice;
+    private bool _budsOnAudioBusy;
+
+    private void RefreshBudsOnAudioControls()
+    {
+        var bluetooth = BluetoothImpl.Instance;
+        var device = bluetooth.Device.Current;
+        BudsOnAudioPanel.IsVisible = device?.Model == Models.BudsOn;
+        if (!ReferenceEquals(_budsOnAudioDevice, device))
+        {
+            _budsOnAudioDevice = device;
+            BudsOnAudioResult.IsVisible = false;
+        }
+
+        BudsOnReadOnlyToggle.IsChecked = bluetooth.BudsOnReadOnly;
+        var connected = device != null && bluetooth.IsBudsOnSettingsDevice(device);
+        BudsOnRefreshButton.IsEnabled = connected && !_budsOnAudioBusy;
+        RefreshBudsOnAudioButton(BudsOnGamingButton, connected
+            ? BudsOnDiagnostics.GetControlValue(device!, BudsOnDiagnostics.Option.GamingMode) : null);
+        RefreshBudsOnAudioButton(BudsOnPauseButton, connected
+            ? BudsOnDiagnostics.GetControlValue(device!, BudsOnDiagnostics.Option.PauseOnRemoval) : null);
+    }
+
+    private void RefreshBudsOnAudioButton(Button button, bool? value)
+    {
+        button.Content = value switch { true => "On · Turn off", false => "Off · Turn on", _ => "Unavailable" };
+        button.CommandParameter = value.HasValue ? (bool?)!value.Value : null;
+        button.IsEnabled = value.HasValue && !_budsOnAudioBusy && !BluetoothImpl.Instance.BudsOnReadOnly;
+    }
+
+    private void OnBudsOnReadOnlyClicked(object? sender, RoutedEventArgs e)
+    {
+        BluetoothImpl.Instance.BudsOnReadOnly = BudsOnReadOnlyToggle.IsChecked == true;
+        RefreshBudsOnAudioControls();
+    }
+
+    private async void OnBudsOnGamingClicked(object? sender, RoutedEventArgs e)
+    {
+        if (BudsOnGamingButton.CommandParameter is bool desired)
+            await RunBudsOnAudioAction(device =>
+                BluetoothImpl.Instance.SetBudsOnOptionAsync(device, BudsOnDiagnostics.Option.GamingMode, desired));
+    }
+
+    private async void OnBudsOnPauseClicked(object? sender, RoutedEventArgs e)
+    {
+        if (BudsOnPauseButton.CommandParameter is bool desired)
+            await RunBudsOnAudioAction(device =>
+                BluetoothImpl.Instance.SetBudsOnOptionAsync(device, BudsOnDiagnostics.Option.PauseOnRemoval, desired));
+    }
+
+    private async void OnBudsOnRefreshClicked(object? sender, RoutedEventArgs e) =>
+        await RunBudsOnAudioAction(async device =>
+            await BluetoothImpl.Instance.RefreshBudsOnStatusAsync(device) ?? "Earbud status refreshed.");
+
+    private async Task RunBudsOnAudioAction(Func<Device, Task<string>> action)
+    {
+        var bluetooth = BluetoothImpl.Instance;
+        var device = bluetooth.Device.Current;
+        if (_budsOnAudioBusy || device == null || !bluetooth.IsBudsOnSettingsDevice(device))
+            return;
+
+        _budsOnAudioBusy = true;
+        BudsOnAudioResult.Text = "Checking earbuds…";
+        BudsOnAudioResult.IsVisible = true;
+        RefreshBudsOnAudioControls();
+        try
+        {
+            BudsOnAudioResult.Text = await action(device);
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Warning(ex, "Buds On audio settings operation failed");
+            BudsOnAudioResult.Text = "The operation was interrupted. Check the current setting.";
+        }
+        finally
+        {
+            _budsOnAudioBusy = false;
+            RefreshBudsOnAudioControls();
+        }
+    }
+
+    private void OnIsTrayIconEnabledChanged(object? sender, RoutedEventArgs e)
+''')
+
 native = 'GalaxyBudsClient.Platform.OSX/Native/'
 replace_once(native + 'src/Bluetooth.h',
     '''typedef void (*Bt_OnChannelClosed)(void);
@@ -1256,16 +1658,26 @@ replace_once(home_vm,
         if (!bluetooth.IsConnected)
             return false;
 
-        var (earbuds, caseBattery) = BudsOnDiagnostics.GetBattery(device);
-        if (earbuds is int level)
-            BudsOnBatteryText = caseBattery is int caseLevel
-                ? $"Earbuds {level}% · Case {caseLevel}%"
-                : $"Earbuds {level}%";
-        else if (caseBattery is int caseOnly)
-            BudsOnBatteryText = $"Case {caseOnly}%";
-        else
+        var (left, right, caseBattery) = BudsOnDiagnostics.GetBattery(device);
+        if (left == null && right == null && caseBattery == null)
             return false;
 
+        var levels = new System.Collections.Generic.List<string>(3);
+        if (left is int level && left == right)
+        {
+            levels.Add($"Earbuds {level}%");
+        }
+        else
+        {
+            if (left is int leftLevel)
+                levels.Add($"Left {leftLevel}%");
+            if (right is int rightLevel)
+                levels.Add($"Right {rightLevel}%");
+        }
+        if (caseBattery is int caseLevel)
+            levels.Add($"Case {caseLevel}%");
+
+        BudsOnBatteryText = string.Join(" · ", levels);
         return true;
     }
 
@@ -1310,86 +1722,200 @@ replace_once(touchpad_view,
     '''                <ext:RequiresConnectedDeviceBehavior />
             </Interaction.Behaviors>
 
-            <controls:SettingsGroup IsVisible="{Binding HasBudsOnCallControls}">
-                <controls:SettingsSymbolItem
-                    Content="{ext:Translate {x:Static i18N:Keys.TouchpadGestureDoubleForCall}}"
-                    Description="{Binding BudsOnCallDoubleTapDescription, Mode=OneWay}"
-                    Symbol="CallInbound" />
-                <controls:SettingsSymbolItem
-                    Content="{ext:Translate {x:Static i18N:Keys.TouchpadGestureHoldForCall}}"
-                    Description="{Binding BudsOnCallHoldDescription, Mode=OneWay}"
-                    Symbol="CallProhibited" />
-                <Button Content="Test Double tap during call…"
-                        Click="OnTestBudsOnAnswerCallClicked" />
-                <Button Content="Test Touch and hold during call…"
-                        Click="OnTestBudsOnDeclineCallClicked" />
-                <Button Content="Test Decline call and Media controls…"
-                        IsEnabled="{Binding CanTestBudsOnDeclineAndMedia, Mode=OneWay}"
-                        Click="OnTestBudsOnDeclineAndMediaClicked" />
-            </controls:SettingsGroup>
+            <StackPanel IsVisible="{Binding IsBudsOnTouchpad}" Spacing="8">
+                <controls:SettingsGroup IsEnabled="{Binding !IsBudsOnTouchpadBusy}">
+                    <controls:SettingsSymbolItem
+                        Content="Media controls"
+                        Description="{Binding BudsOnMedia.Description}"
+                        Symbol="VideoPlayPause">
+                        <controls:SettingsSymbolItem.Footer>
+                            <Button Content="{Binding BudsOnMedia.Action}"
+                                    IsEnabled="{Binding BudsOnMedia.CanChange}"
+                                    CommandParameter="{Binding BudsOnMedia.DesiredValue}"
+                                    AutomationProperties.Name="Change Media controls"
+                                    Click="OnBudsOnMediaClicked" />
+                        </controls:SettingsSymbolItem.Footer>
+                    </controls:SettingsSymbolItem>
+                    <controls:SettingsSymbolItem
+                        Content="Answer call or end call"
+                        Description="{Binding BudsOnAnswerOrEnd.Description}"
+                        Symbol="CallInbound">
+                        <controls:SettingsSymbolItem.Footer>
+                            <Button Content="{Binding BudsOnAnswerOrEnd.Action}"
+                                    IsEnabled="{Binding BudsOnAnswerOrEnd.CanChange}"
+                                    CommandParameter="{Binding BudsOnAnswerOrEnd.DesiredValue}"
+                                    AutomationProperties.Name="Change Answer call or end call"
+                                    Click="OnBudsOnAnswerOrEndClicked" />
+                        </controls:SettingsSymbolItem.Footer>
+                    </controls:SettingsSymbolItem>
+                    <controls:SettingsSymbolItem
+                        Content="Decline call"
+                        Description="{Binding BudsOnDecline.Description}"
+                        Symbol="CallProhibited">
+                        <controls:SettingsSymbolItem.Footer>
+                            <Button Content="{Binding BudsOnDecline.Action}"
+                                    IsEnabled="{Binding BudsOnDecline.CanChange}"
+                                    CommandParameter="{Binding BudsOnDecline.DesiredValue}"
+                                    AutomationProperties.Name="Change Decline call"
+                                    Click="OnBudsOnDeclineClicked" />
+                        </controls:SettingsSymbolItem.Footer>
+                    </controls:SettingsSymbolItem>
+                    <controls:SettingsSymbolItem
+                        Content="Volume on left hold"
+                        Description="{Binding BudsOnLeftHoldVolume.Description}"
+                        Symbol="ArrowStepInLeft">
+                        <controls:SettingsSymbolItem.Footer>
+                            <Button Content="{Binding BudsOnLeftHoldVolume.Action}"
+                                    IsEnabled="{Binding BudsOnLeftHoldVolume.CanChange}"
+                                    CommandParameter="{Binding BudsOnLeftHoldVolume.DesiredValue}"
+                                    AutomationProperties.Name="Change Volume on left hold"
+                                    Click="OnBudsOnLeftHoldVolumeClicked" />
+                        </controls:SettingsSymbolItem.Footer>
+                    </controls:SettingsSymbolItem>
+                    <controls:SettingsSymbolItem
+                        Content="Volume on right hold"
+                        Description="{Binding BudsOnRightHoldVolume.Description}"
+                        Symbol="ArrowStepInRight">
+                        <controls:SettingsSymbolItem.Footer>
+                            <Button Content="{Binding BudsOnRightHoldVolume.Action}"
+                                    IsEnabled="{Binding BudsOnRightHoldVolume.CanChange}"
+                                    CommandParameter="{Binding BudsOnRightHoldVolume.DesiredValue}"
+                                    AutomationProperties.Name="Change Volume on right hold"
+                                    Click="OnBudsOnRightHoldVolumeClicked" />
+                        </controls:SettingsSymbolItem.Footer>
+                    </controls:SettingsSymbolItem>
+                </controls:SettingsGroup>
+                <Button Content="Refresh status"
+                        IsEnabled="{Binding CanRefreshBudsOnTouchpad}"
+                        Click="OnRefreshBudsOnTouchpadClicked" />
+                <TextBlock Text="{Binding BudsOnTouchpadResult}"
+                           IsVisible="{Binding HasBudsOnTouchpadResult}"
+                           TextWrapping="Wrap" />
+            </StackPanel>
 ''')
+replace_once(touchpad_view,
+    '            <controls:SettingsGroup>\n'
+    '                <Interaction.Behaviors>\n'
+    '                    <ext:RequiresFeatureBehavior Feature="TouchpadLock" />',
+    '            <controls:SettingsGroup IsVisible="{Binding !IsBudsOnTouchpad}">\n'
+    '                <Interaction.Behaviors>\n'
+    '                    <ext:RequiresFeatureBehavior Feature="TouchpadLock" />')
+replace_once(touchpad_view,
+    '            <controls:SettingsGroup>\n'
+    '                <controls:SettingsGroup.IsEnabled>',
+    '            <controls:SettingsGroup IsVisible="{Binding !IsBudsOnTouchpad}">\n'
+    '                <controls:SettingsGroup.IsEnabled>')
+replace_once(touchpad_view,
+    '            <controls:SettingsGroup IsEnabled="{Binding !IsTouchpadLocked}">',
+    '            <controls:SettingsGroup IsVisible="{Binding !IsBudsOnTouchpad}"\n'
+    '                                    IsEnabled="{Binding !IsTouchpadLocked}">')
 
 touchpad_vm = 'GalaxyBudsClient/Interface/ViewModels/Pages/TouchpadPageViewModel.cs'
 replace_once(touchpad_vm,
     '    public override Control CreateView() => new TouchpadPage { DataContext = this };\n',
-    '''    private readonly DispatcherTimer _budsOnCallTimer = new() { Interval = TimeSpan.FromSeconds(1) };
-    private (bool AnswerOrEnd, bool Decline)? _budsOnCallControls;
-    private bool _canTestBudsOnDeclineAndMedia;
-
-    public bool HasBudsOnCallControls => _budsOnCallControls.HasValue;
-    public bool CanTestBudsOnDeclineAndMedia => _canTestBudsOnDeclineAndMedia;
-    public string? BudsOnCallDoubleTapDescription => DescribeCallControl(_budsOnCallControls?.AnswerOrEnd);
-    public string? BudsOnCallHoldDescription => DescribeCallControl(_budsOnCallControls?.Decline);
-
-    private static string? DescribeCallControl(bool? enabled) => enabled switch
+    '''    public sealed record BudsOnTouchSetting(bool? Enabled, bool Experimental = false, bool ReadOnly = false)
     {
-        true => "On",
-        false => "Off",
-        null => null
-    };
+        public string Description => (Enabled switch
+        {
+            true => "On",
+            false => "Off",
+            null => "Unavailable"
+        }) + (Experimental ? " · Experimental" : "");
+
+        public bool CanChange => Enabled.HasValue && !ReadOnly;
+        public bool DesiredValue => Enabled == false;
+        public string Action => Enabled switch
+        {
+            true => "Turn off",
+            false => "Turn on",
+            null => "Change"
+        };
+    }
+
+    private readonly DispatcherTimer _budsOnTouchpadTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private Device? _budsOnTouchpadDevice;
+    private bool _isBudsOnTouchpad;
+    private bool _canRefreshBudsOnTouchpad;
+    private bool _isBudsOnTouchpadBusy;
+    private string? _budsOnTouchpadResult;
+    private BudsOnTouchSetting _budsOnMedia = new(null);
+    private BudsOnTouchSetting _budsOnAnswerOrEnd = new(null);
+    private BudsOnTouchSetting _budsOnDecline = new(null);
+    private BudsOnTouchSetting _budsOnLeftHoldVolume = new(null, Experimental: true);
+    private BudsOnTouchSetting _budsOnRightHoldVolume = new(null, Experimental: true);
+
+    public bool IsBudsOnTouchpad => _isBudsOnTouchpad;
+    public bool CanRefreshBudsOnTouchpad => _canRefreshBudsOnTouchpad && !IsBudsOnTouchpadBusy;
+    public BudsOnTouchSetting BudsOnMedia => _budsOnMedia;
+    public BudsOnTouchSetting BudsOnAnswerOrEnd => _budsOnAnswerOrEnd;
+    public BudsOnTouchSetting BudsOnDecline => _budsOnDecline;
+    public BudsOnTouchSetting BudsOnLeftHoldVolume => _budsOnLeftHoldVolume;
+    public BudsOnTouchSetting BudsOnRightHoldVolume => _budsOnRightHoldVolume;
+    public bool HasBudsOnTouchpadResult => !string.IsNullOrEmpty(BudsOnTouchpadResult);
+
+    public bool IsBudsOnTouchpadBusy
+    {
+        get => _isBudsOnTouchpadBusy;
+        internal set
+        {
+            this.RaiseAndSetIfChanged(ref _isBudsOnTouchpadBusy, value);
+            this.RaisePropertyChanged(nameof(CanRefreshBudsOnTouchpad));
+        }
+    }
+
+    public string? BudsOnTouchpadResult
+    {
+        get => _budsOnTouchpadResult;
+        internal set
+        {
+            this.RaiseAndSetIfChanged(ref _budsOnTouchpadResult, value);
+            this.RaisePropertyChanged(nameof(HasBudsOnTouchpadResult));
+        }
+    }
 
     public override Control CreateView() => new TouchpadPage { DataContext = this };
 ''')
 replace_once(touchpad_vm,
     '    public TouchpadPageViewModel()\n    {\n',
     '    public TouchpadPageViewModel()\n    {\n'
-    '        _budsOnCallTimer.Tick += (_, _) => RefreshBudsOnCallControls();\n')
+    '        _budsOnTouchpadTimer.Tick += (_, _) => RefreshBudsOnTouchpad();\n')
 replace_once(touchpad_vm,
     '    public override void OnNavigatedTo() => UpdateEditStates();\n',
     '''    public override void OnNavigatedTo()
     {
         UpdateEditStates();
-        RefreshBudsOnCallControls();
+        RefreshBudsOnTouchpad();
         if (PlatformUtils.IsOSX)
-            _budsOnCallTimer.Start();
+            _budsOnTouchpadTimer.Start();
     }
 
-    public override void OnNavigatedFrom() => _budsOnCallTimer.Stop();
+    public override void OnNavigatedFrom() => _budsOnTouchpadTimer.Stop();
 
-    private void RefreshBudsOnCallControls()
+    internal void RefreshBudsOnTouchpad()
     {
         var bluetooth = BluetoothImpl.Instance;
         var device = bluetooth.Device.Current;
-        var controls = PlatformUtils.IsOSX && bluetooth.IsConnected && device?.Model == Models.BudsOn
-            ? BudsOnDiagnostics.GetCallControls(device)
-            : null;
-        var declineAndMedia = (byte)BudsOnDiagnostics.CallControl.DeclineAndMedia;
-        var canTestDeclineAndMedia = device != null && bluetooth.IsBudsOnCallTestDevice(device) &&
-            BudsOnDiagnostics.GetCallTestSample(device) is { } sample &&
-            (sample.Flags & declineAndMedia) == declineAndMedia;
-        if (_canTestBudsOnDeclineAndMedia != canTestDeclineAndMedia)
+        if (!ReferenceEquals(_budsOnTouchpadDevice, device))
         {
-            _canTestBudsOnDeclineAndMedia = canTestDeclineAndMedia;
-            this.RaisePropertyChanged(nameof(CanTestBudsOnDeclineAndMedia));
+            _budsOnTouchpadDevice = device;
+            BudsOnTouchpadResult = null;
         }
 
-        if (_budsOnCallControls == controls)
-            return;
+        this.RaiseAndSetIfChanged(ref _isBudsOnTouchpad, device?.Model == Models.BudsOn, nameof(IsBudsOnTouchpad));
+        var canRead = device != null && bluetooth.IsBudsOnSettingsDevice(device);
+        this.RaiseAndSetIfChanged(ref _canRefreshBudsOnTouchpad, canRead, nameof(CanRefreshBudsOnTouchpad));
 
-        _budsOnCallControls = controls;
-        this.RaisePropertyChanged(nameof(HasBudsOnCallControls));
-        this.RaisePropertyChanged(nameof(BudsOnCallDoubleTapDescription));
-        this.RaisePropertyChanged(nameof(BudsOnCallHoldDescription));
+        BudsOnTouchSetting Read(BudsOnDiagnostics.Option option, bool experimental = false) =>
+            new(canRead ? BudsOnDiagnostics.GetControlValue(device!, option) : null, experimental,
+                bluetooth.BudsOnReadOnly);
+
+        this.RaiseAndSetIfChanged(ref _budsOnMedia, Read(BudsOnDiagnostics.Option.Media), nameof(BudsOnMedia));
+        this.RaiseAndSetIfChanged(ref _budsOnAnswerOrEnd, Read(BudsOnDiagnostics.Option.AnswerOrEnd), nameof(BudsOnAnswerOrEnd));
+        this.RaiseAndSetIfChanged(ref _budsOnDecline, Read(BudsOnDiagnostics.Option.Decline), nameof(BudsOnDecline));
+        this.RaiseAndSetIfChanged(ref _budsOnLeftHoldVolume,
+            Read(BudsOnDiagnostics.Option.LeftHoldVolume, experimental: true), nameof(BudsOnLeftHoldVolume));
+        this.RaiseAndSetIfChanged(ref _budsOnRightHoldVolume,
+            Read(BudsOnDiagnostics.Option.RightHoldVolume, experimental: true), nameof(BudsOnRightHoldVolume));
     }
 ''')
 
@@ -1397,25 +1923,26 @@ write_once(native + 'src/BudsOnCallControl.h', '''#pragma once
 
 #include <array>
 #include <cstdint>
+#include <optional>
 
 template <std::size_t Size>
-inline void FinishBudsOnFrame(std::array<uint8_t, Size> &frame) {
+inline void FinishBudsOnFrame(std::array<uint8_t, Size> &frame, std::size_t length = Size) {
     uint16_t crc = 0;
-    for (std::size_t i = 3; i < Size - 3; ++i) {
+    for (std::size_t i = 3; i < length - 3; ++i) {
         crc ^= static_cast<uint16_t>(frame[i]) << 8;
         for (int bit = 0; bit < 8; ++bit)
             crc = static_cast<uint16_t>((crc << 1) ^ ((crc & 0x8000) ? 0x1021 : 0));
     }
-    frame[Size - 3] = static_cast<uint8_t>(crc);
-    frame[Size - 2] = static_cast<uint8_t>(crc >> 8);
-    frame[Size - 1] = 0xdd;
+    frame[length - 3] = static_cast<uint8_t>(crc);
+    frame[length - 2] = static_cast<uint8_t>(crc >> 8);
+    frame[length - 1] = 0xdd;
 }
 
 inline bool IsBudsOnCallTestAllowed(uint8_t flags, uint8_t mask, uint8_t enabled) {
     // Samsung's Media controls switches bits 1, 2, 3, and 6 together.
     // The combined test may turn those flags and Decline (bit 5) off once.
-    if (mask == 0x6e)
-        return enabled == 0 && (flags & mask) == mask;
+    if (mask == 0x4e)
+        return (enabled == 0 && (flags & mask) == mask) || (enabled == 1 && (flags & mask) == 0);
     if (mask != 0x10 && mask != 0x20)
         return false;
 
@@ -1441,6 +1968,42 @@ inline std::array<uint8_t, 8> MakeBudsOnEqualizerFrame(uint8_t preset) {
     FinishBudsOnFrame(frame);
     return frame;
 }
+
+struct BudsOnOptionFrame {
+    std::array<uint8_t, 11> bytes;
+    uint16_t length;
+};
+
+inline std::optional<BudsOnOptionFrame> MakeBudsOnOptionFrame(uint8_t control, uint8_t value, uint8_t sibling) {
+    BudsOnOptionFrame frame{{0xfd, 0, 0, control}, 0};
+    switch (control) {
+        case 0x85: // Gaming mode.
+        case 0x6c: // Pause when one earbud is removed.
+            if (value > 1 || sibling != 0)
+                return std::nullopt;
+            frame.bytes[4] = value;
+            frame.length = 8;
+            break;
+        case 0x92: // Set only verified hold actions, preserving both sides.
+            if ((value != 0 && value != 6) || (sibling != 0 && sibling != 6))
+                return std::nullopt;
+            frame.bytes[4] = value;
+            frame.bytes[5] = sibling;
+            frame.length = 11;
+            break;
+        case 0x69: // Read equalizer curves.
+            if (value != 0 || sibling != 0)
+                return std::nullopt;
+            frame.length = 7;
+            break;
+        default:
+            return std::nullopt;
+    }
+
+    frame.bytes[1] = static_cast<uint8_t>(frame.length - 4);
+    FinishBudsOnFrame(frame.bytes, frame.length);
+    return frame;
+}
 ''')
 
 replace_once(native + 'src/Bluetooth.h',
@@ -1451,12 +2014,14 @@ replace_once(native + 'src/Bluetooth.h',
     '''- (BT_SEND_RESULT)sendData:(char *)buffer length:(UInt32)length;
 - (BT_SEND_RESULT)sendBudsOnCallTest:(uint64_t)stamp flags:(UInt8)flags mask:(UInt8)mask enabled:(UInt8)enabled;
 - (BT_SEND_RESULT)sendBudsOnEqualizerTest:(uint64_t)stamp preset:(UInt8)preset;
+- (BT_SEND_RESULT)sendBudsOnOption:(uint64_t)stamp control:(UInt8)control value:(UInt8)value sibling:(UInt8)sibling;
 ''')
 replace_once(native + 'include/Native.h',
     'extern BT_SEND_RESULT bt_send(BluetoothImpl *self, void *data, unsigned int length);\n',
     '''extern BT_SEND_RESULT bt_send(BluetoothImpl *self, void *data, unsigned int length);
 extern BT_SEND_RESULT bt_send_budson_call_test(BluetoothImpl *self, uint64_t stamp, uint8_t flags, uint8_t mask, uint8_t enabled);
 extern BT_SEND_RESULT bt_send_budson_eq_test(BluetoothImpl *self, uint64_t stamp, uint8_t preset);
+extern BT_SEND_RESULT bt_send_budson_option(BluetoothImpl *self, uint64_t stamp, uint8_t control, uint8_t value, uint8_t sibling);
 ''')
 replace_once(native + 'src/bridge/Native.Bluetooth.mm',
     '''BT_SEND_RESULT bt_send(BluetoothImpl *self, void *data, unsigned int length) {
@@ -1473,6 +2038,10 @@ BT_SEND_RESULT bt_send_budson_call_test(BluetoothImpl *self, uint64_t stamp, uin
 
 BT_SEND_RESULT bt_send_budson_eq_test(BluetoothImpl *self, uint64_t stamp, uint8_t preset) {
     return [self->client sendBudsOnEqualizerTest:stamp preset:preset];
+}
+
+BT_SEND_RESULT bt_send_budson_option(BluetoothImpl *self, uint64_t stamp, uint8_t control, uint8_t value, uint8_t sibling) {
+    return [self->client sendBudsOnOption:stamp control:control value:value sibling:sibling];
 }
 ''')
 replace_once(native + 'src/Bluetooth.mm',
@@ -1542,6 +2111,14 @@ replace_once(native + 'src/Bluetooth.mm',
     return [self sendBudsOnTestFrame:stamp data:frame.data() length:static_cast<UInt16>(frame.size())];
 }
 
+- (BT_SEND_RESULT)sendBudsOnOption:(uint64_t)stamp control:(UInt8)control value:(UInt8)value sibling:(UInt8)sibling {
+    auto frame = MakeBudsOnOptionFrame(control, value, sibling);
+    if (!frame)
+        return BT_SEND_ENULL;
+
+    return [self sendBudsOnTestFrame:stamp data:frame->bytes.data() length:frame->length];
+}
+
 - (void)setOnChannelData:(Bt_OnChannelData)callback {
 ''')
 replace_once('GalaxyBudsClient.Platform.OSX/Unmanaged.cs',
@@ -1558,6 +2135,10 @@ replace_once('GalaxyBudsClient.Platform.OSX/Unmanaged.cs',
     [DllImport(DSO.Name, CallingConvention = CallingConvention.Cdecl)]
     internal static extern unsafe BT_SEND_RESULT bt_send_budson_eq_test(
         BluetoothImpl* self, ulong stamp, byte preset);
+
+    [DllImport(DSO.Name, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern unsafe BT_SEND_RESULT bt_send_budson_option(
+        BluetoothImpl* self, ulong stamp, byte control, byte value, byte sibling);
 ''')
 replace_once(mac_bluetooth,
     '        private void OnChannelData(IntPtr data, ulong size)\n',
@@ -1585,6 +2166,27 @@ replace_once(mac_bluetooth,
             {
                 return TrySendBudsOnTest(expectedMac, getCurrentStamp, stamp =>
                     Bluetooth.bt_send_budson_eq_test(_nativePtr, stamp, preset) == BT_SEND_RESULT.BT_SEND_SUCCESS);
+            }
+        }
+
+        public bool TrySendBudsOnOption(string expectedMac, byte control, byte value, byte sibling,
+            Func<ulong?> getCurrentStamp)
+        {
+            var valid = control switch
+            {
+                0x85 or 0x6c => value <= 1 && sibling == 0,
+                0x92 => (value is 0 or 6) && (sibling is 0 or 6),
+                0x69 => value == 0 && sibling == 0,
+                _ => false
+            };
+            if (!valid)
+                return false;
+
+            unsafe
+            {
+                return TrySendBudsOnTest(expectedMac, getCurrentStamp, stamp =>
+                    Bluetooth.bt_send_budson_option(_nativePtr, stamp, control, value, sibling)
+                    == BT_SEND_RESULT.BT_SEND_SUCCESS);
             }
         }
 
@@ -1623,70 +2225,110 @@ replace_once(mac_bluetooth,
 replace_once(bluetooth,
     '    public async Task SendAltAsync(SppAlternativeMessage msg)\n    {\n'
     '        // Block SMEP/MDE property writes',
-    '''    internal bool IsBudsOnCallTestDevice(Device device) =>
+    '''    internal bool IsBudsOnSettingsDevice(Device device) =>
         PlatformUtils.IsOSX && !AlternativeModeEnabled && IsConnected &&
         device.Model == Models.BudsOn && ReferenceEquals(Device.Current, device);
 
 #if OSX
-    private int _budsOnSettingsTestInProgress;
+    private int _budsOnOperationInProgress;
 #endif
+    private int _budsOnReadOnly;
 
-    internal async Task<string> TestBudsOnCallAsync(Device device, BudsOnDiagnostics.CallSample expected,
-        BudsOnDiagnostics.CallControl control)
+    internal bool BudsOnReadOnly
+    {
+        get => Volatile.Read(ref _budsOnReadOnly) != 0;
+        set => Volatile.Write(ref _budsOnReadOnly, value ? 1 : 0);
+    }
+
+    internal async Task<string?> RefreshBudsOnStatusAsync(Device device)
     {
 #if OSX
-        if (_backend is OSX.BluetoothService backend && IsBudsOnCallTestDevice(device) &&
-            (control is BudsOnDiagnostics.CallControl.AnswerOrEnd or BudsOnDiagnostics.CallControl.Decline ||
-             (control == BudsOnDiagnostics.CallControl.DeclineAndMedia && expected.IsOn(control))))
+        if (_backend is OSX.BluetoothService && IsBudsOnSettingsDevice(device))
         {
-            if (Interlocked.CompareExchange(ref _budsOnSettingsTestInProgress, 1, 0) != 0)
-                return "A Buds On settings test is already in progress.";
+            if (Interlocked.CompareExchange(ref _budsOnOperationInProgress, 1, 0) != 0)
+                return "A Buds On operation is in progress.";
 
             try
             {
-                long replyBarrier = 0;
-                var sentSample = expected;
-                var enable = !expected.IsOn(control);
-                var sent = await Task.Run(() => backend.TrySendBudsOnCallTest(
-                    device.MacAddress, expected.Flags, (byte)control, enable, () =>
-                    {
-                        if (!IsBudsOnCallTestDevice(device) ||
-                            BudsOnDiagnostics.TakeCallTestSample(device, expected) is not { } approved)
-                            return null;
-
-                        sentSample = approved.Sample;
-                        replyBarrier = approved.ReplyBarrier;
-                        return approved.Stamp;
-                    }));
-                if (sent)
-                {
-                    if (control == BudsOnDiagnostics.CallControl.DeclineAndMedia)
-                        BudsOnDiagnostics.Record("Decline call and Media controls test sent (Off)");
-                    else
-                        BudsOnDiagnostics.Record($"Call control test sent ({control} {(enable ? "On" : "Off")})");
-                    var outcome = await WaitForBudsOnCallTestAsync(device, sentSample, control, replyBarrier);
-                    BudsOnDiagnostics.Record(outcome);
-                    return outcome;
-                }
+                if (await RefreshBudsOnStatusCoreAsync(device))
+                    return null;
             }
             finally
             {
-                Volatile.Write(ref _budsOnSettingsTestInProgress, 0);
+                Volatile.Write(ref _budsOnOperationInProgress, 0);
             }
         }
 #endif
-        return "The test frame was not sent. Reconnect to refresh the earbuds’ status before testing again.";
+        return "Connect your Buds On in the Mac app and try refreshing their status.";
     }
 
-    internal async Task<string> TestBudsOnEqualizerAsync(Device device, BudsOnDiagnostics.EqualizerSample expected,
+    internal async Task<string> SetBudsOnOptionAsync(Device device, BudsOnDiagnostics.Option option, bool desired)
+    {
+        if (BudsOnReadOnly)
+            return "Buds On is in read-only mode.";
+
+#if OSX
+        if (_backend is OSX.BluetoothService backend && IsBudsOnSettingsDevice(device))
+        {
+            if (Interlocked.CompareExchange(ref _budsOnOperationInProgress, 1, 0) != 0)
+                return "A Buds On operation is in progress.";
+
+            try
+            {
+                var sample = BudsOnDiagnostics.GetOptionSample(device, option);
+                if (sample == null && await RefreshBudsOnStatusCoreAsync(device))
+                    sample = BudsOnDiagnostics.GetOptionSample(device, option);
+
+                if (sample is not { } expected)
+                    return "The earbuds did not report a supported value for this setting.";
+                if (expected.CurrentValue == desired)
+                    return "The earbuds already report the selected setting.";
+                if (BudsOnDiagnostics.PrepareOption(option, expected, desired) is not { } outbound)
+                    return "This setting is unavailable for the current earbud state.";
+
+                var expectedMac = device.MacAddress;
+                BudsOnDiagnostics.OptionWrite? sentWrite = null;
+                ulong? GetStamp()
+                {
+                    if (BudsOnReadOnly || !IsBudsOnSettingsDevice(device))
+                        return null;
+
+                    sentWrite = BudsOnDiagnostics.TakeOptionSample(device, option, desired, expected);
+                    return sentWrite?.Stamp;
+                }
+
+                var sent = await Task.Run(() => outbound.Mask != 0
+                    ? backend.TrySendBudsOnCallTest(expectedMac, outbound.Flags, outbound.Mask, desired, GetStamp)
+                    : backend.TrySendBudsOnOption(expectedMac, outbound.Opcode, outbound.Value, outbound.Sibling, GetStamp));
+                if (!sent || sentWrite is not { } write)
+                    return "The setting could not be sent. Refresh status before trying again.";
+
+                BudsOnDiagnostics.Record($"Buds On setting sent ({option} {(desired ? "On" : "Off")})");
+                var result = await WaitForBudsOnOptionAsync(device, option, desired, write);
+                BudsOnDiagnostics.Record($"{option}: {result}");
+                return result;
+            }
+            finally
+            {
+                Volatile.Write(ref _budsOnOperationInProgress, 0);
+            }
+        }
+#endif
+        return "Connect your Buds On in the Mac app to change this setting.";
+    }
+
+    internal async Task<string> SetBudsOnEqualizerAsync(Device device, BudsOnDiagnostics.EqualizerSample expected,
         byte targetPreset)
     {
+        if (BudsOnReadOnly)
+            return "Buds On is in read-only mode.";
+
 #if OSX
-        if (_backend is OSX.BluetoothService backend && IsBudsOnCallTestDevice(device) &&
-            targetPreset <= 5 && targetPreset != expected.Preset)
+        if (_backend is OSX.BluetoothService backend && IsBudsOnSettingsDevice(device) &&
+            expected.Preset <= 5 && targetPreset <= 5 && targetPreset != expected.Preset)
         {
-            if (Interlocked.CompareExchange(ref _budsOnSettingsTestInProgress, 1, 0) != 0)
-                return "A Buds On settings test is already in progress.";
+            if (Interlocked.CompareExchange(ref _budsOnOperationInProgress, 1, 0) != 0)
+                return "A Buds On operation is in progress.";
 
             try
             {
@@ -1694,75 +2336,157 @@ replace_once(bluetooth,
                 long replyBarrier = 0;
                 var sent = await Task.Run(() => backend.TrySendBudsOnEqualizerTest(expectedMac, targetPreset, () =>
                 {
-                    if (!IsBudsOnCallTestDevice(device) ||
+                    if (BudsOnReadOnly || !IsBudsOnSettingsDevice(device) ||
                         BudsOnDiagnostics.TakeEqualizerTestSample(device, expected, targetPreset) is not { } approved)
                         return null;
 
                     replyBarrier = approved.ReplyBarrier;
                     return approved.Stamp;
                 }));
-                if (sent)
+                if (!sent)
+                    return "The preset could not be sent. Refresh status and select the preset again.";
+
+                var name = BudsOnDiagnostics.GetEqualizerPresetName(targetPreset);
+                BudsOnDiagnostics.Record($"Buds On EQ preset sent ({name})");
+                for (var i = 0; i < 10; i++)
                 {
-                    BudsOnDiagnostics.Record($"EQ preset test sent ({BudsOnDiagnostics.GetEqualizerPresetName(targetPreset)})");
-                    var outcome = await WaitForBudsOnEqualizerTestAsync(device, expected.Session, targetPreset, replyBarrier);
-                    BudsOnDiagnostics.Record(outcome);
-                    return outcome;
+                    await Task.Delay(200);
+                    if (!IsBudsOnSettingsDevice(device) ||
+                        BudsOnDiagnostics.GetEqualizerTestReadback(device, expected.Session, replyBarrier) is not { } readback)
+                        return "The connection changed. Check the EQ preset after reconnecting.";
+
+                    if (readback.Preset == targetPreset)
+                    {
+                        BudsOnDiagnostics.Record($"Buds On EQ preset verified ({name})");
+                        return $"The earbuds report {name}.";
+                    }
                 }
+
+                if (await RefreshBudsOnStatusCoreAsync(device) && BudsOnDiagnostics.GetEqualizerPreset(device) == targetPreset)
+                {
+                    BudsOnDiagnostics.Record($"Buds On EQ preset verified after refresh ({name})");
+                    return $"The earbuds report {name}.";
+                }
+
+                BudsOnDiagnostics.Record("Buds On EQ change awaiting readback");
+                return "The preset change was sent. Check the result after reconnecting.";
             }
             finally
             {
-                Volatile.Write(ref _budsOnSettingsTestInProgress, 0);
+                Volatile.Write(ref _budsOnOperationInProgress, 0);
             }
         }
 #endif
-        return "The EQ test frame was not sent. Reconnect to refresh the earbuds’ status before testing again.";
+        return "Connect your Buds On with a standard preset selected to change EQ.";
     }
 
-    private async Task<string> WaitForBudsOnEqualizerTestAsync(Device device, long session,
-        byte targetPreset, long replyBarrier)
+    internal async Task<string> ReadBudsOnEqualizerCurvesAsync(Device device)
     {
-        byte? acknowledgedPreset = null;
-        for (var i = 0; i < 32; i++)
+#if OSX
+        if (_backend is OSX.BluetoothService backend && IsBudsOnSettingsDevice(device))
         {
-            await Task.Delay(250);
-            if (!IsBudsOnCallTestDevice(device) ||
-                BudsOnDiagnostics.GetEqualizerTestReadback(device, session, replyBarrier) is not { } readback)
-                return "The connection changed before the EQ test could be verified. Check the preset on your Galaxy.";
+            if (Interlocked.CompareExchange(ref _budsOnOperationInProgress, 1, 0) != 0)
+                return "A Buds On operation is in progress.";
 
-            acknowledgedPreset = readback.AcknowledgedPreset ?? acknowledgedPreset;
-            if (readback.Preset == targetPreset)
-                return $"The earbuds reported the new EQ preset ({BudsOnDiagnostics.GetEqualizerPresetName(targetPreset)}).";
+            try
+            {
+                var expectedMac = device.MacAddress;
+                (ulong Stamp, long Session, long ReplyBarrier)? request = null;
+                var sent = await Task.Run(() => backend.TrySendBudsOnOption(expectedMac, 0x69, 0, 0, () =>
+                {
+                    if (!IsBudsOnSettingsDevice(device))
+                        return null;
+
+                    request = BudsOnDiagnostics.TakeEqualizerCurvesRequest(device);
+                    return request?.Stamp;
+                }));
+                if (!sent || request is not { } sentRequest)
+                    return "The curve request could not be sent. Refresh status and try again.";
+
+                for (var i = 0; i < 16; i++)
+                {
+                    await Task.Delay(200);
+                    if (!IsBudsOnSettingsDevice(device))
+                        break;
+                    if (BudsOnDiagnostics.GetEqualizerCurvesReadback(device, sentRequest.Session,
+                            sentRequest.ReplyBarrier) is { } custom)
+                    {
+                        BudsOnDiagnostics.Record("Buds On returned a valid nine-band Custom EQ curve");
+                        string[] frequencies = ["63 Hz", "125 Hz", "250 Hz", "500 Hz", "1 kHz", "2 kHz",
+                            "4 kHz", "8 kHz", "16 kHz"];
+                        return string.Join(Environment.NewLine,
+                            frequencies.Select((frequency, index) => $"{frequency}   {custom[index]:+0;-0;0}"));
+                    }
+                }
+
+                BudsOnDiagnostics.Record("Buds On Custom EQ curve request had no validated reply");
+                return "The earbuds did not return a validated nine-band curve.";
+            }
+            finally
+            {
+                Volatile.Write(ref _budsOnOperationInProgress, 0);
+            }
         }
-
-        if (acknowledgedPreset is byte preset)
-            return $"The EQ reply reported {BudsOnDiagnostics.GetEqualizerPresetName(preset)}. Check the preset on your Galaxy.";
-
-        return "The EQ test was sent. Check the preset on your Galaxy.";
+#endif
+        return "Connect your Buds On to read the stored Custom EQ curve.";
     }
 
-    private async Task<string> WaitForBudsOnCallTestAsync(Device device, BudsOnDiagnostics.CallSample sent,
-        BudsOnDiagnostics.CallControl control, long replyBarrier)
+#if OSX
+    private async Task<string> WaitForBudsOnOptionAsync(Device device, BudsOnDiagnostics.Option option,
+        bool desired, BudsOnDiagnostics.OptionWrite write)
     {
         var acknowledged = false;
-        var mask = (byte)control;
-        for (var i = 0; i < 32; i++)
+        const string state = "The earbuds report the selected value.";
+        const string changed = "Another setting changed during the update. Review the earbuds’ current settings.";
+        for (var i = 0; i < 10; i++)
         {
-            await Task.Delay(250);
-            if (!IsBudsOnCallTestDevice(device) ||
-                BudsOnDiagnostics.GetCallTestReadback(device, sent.Session, replyBarrier) is not { } readback)
-                return "The connection changed before the result could be verified. Check the setting on your Galaxy.";
+            await Task.Delay(200);
+            if (!IsBudsOnSettingsDevice(device) ||
+                BudsOnDiagnostics.GetOptionReadback(device, option, write) is not { } readback)
+                return "The connection changed. Check the setting after reconnecting.";
 
             acknowledged |= readback.Acknowledged;
-            if (readback.Flags == (byte)(sent.Flags ^ mask))
-                return "The earbuds reported the requested touch settings and the other flags matched.";
-            if (readback.Flags is byte flags && ((flags ^ sent.Flags) & ~mask) != 0)
-                return "Other touch flags changed during the test. Check the settings on your Galaxy.";
+            if (readback.OtherChanged)
+                return changed;
+            if (readback.Value == desired)
+                return state;
+        }
+
+        // The management channel refreshes state without replaying the setting command.
+        if (await RefreshBudsOnStatusCoreAsync(device) &&
+            BudsOnDiagnostics.GetOptionReadback(device, option, write, freshConnection: true) is { } refreshed)
+        {
+            if (refreshed.OtherChanged)
+                return changed;
+            if (refreshed.Value == desired)
+                return state;
         }
 
         return acknowledged
-            ? "The earbuds acknowledged the command. Check your Galaxy to verify the changes."
-            : "The command was sent. Check your Galaxy to verify the changes.";
+            ? "The earbuds acknowledged the change. The setting still needs a fresh reading."
+            : "The setting was sent. Check its value after reconnecting.";
     }
+
+    private async Task<bool> RefreshBudsOnStatusCoreAsync(Device device)
+    {
+        if (!IsBudsOnSettingsDevice(device))
+            return false;
+
+        await DisconnectAsync();
+        if (!ReferenceEquals(Device.Current, device) || AlternativeModeEnabled || !await ConnectAsync(device))
+            return false;
+
+        for (var i = 0; i < 20; i++)
+        {
+            if (!ReferenceEquals(Device.Current, device) || AlternativeModeEnabled)
+                return false;
+            if (IsConnected && BudsOnDiagnostics.HasFreshStatus(device))
+                return true;
+            await Task.Delay(200);
+        }
+        return false;
+    }
+#endif
 
     public async Task SendAltAsync(SppAlternativeMessage msg)
     {
@@ -1776,80 +2500,96 @@ replace_once(touchpad_code,
     'using GalaxyBudsClient.Model.Config;\n',
     'using GalaxyBudsClient.Model.Config;\nusing GalaxyBudsClient.Platform;\n')
 replace_once(touchpad_code,
-    '    public TouchpadPage()\n',
-    '''    private bool _budsOnCallTestOpen;
-
-    public TouchpadPage()
-''')
-replace_once(touchpad_code,
     '    private void OnEditLeftCustomActionClicked(object? sender, RoutedEventArgs e)\n',
-    '''    private async void OnTestBudsOnAnswerCallClicked(object? sender, RoutedEventArgs e) =>
-        await RunBudsOnCallTestAsync(BudsOnDiagnostics.CallControl.AnswerOrEnd, "Double tap during call");
+    '''    private async void OnBudsOnMediaClicked(object? sender, RoutedEventArgs e) =>
+        await SetBudsOnTouchpadOptionAsync(sender, BudsOnDiagnostics.Option.Media);
 
-    private async void OnTestBudsOnDeclineCallClicked(object? sender, RoutedEventArgs e) =>
-        await RunBudsOnCallTestAsync(BudsOnDiagnostics.CallControl.Decline, "Touch and hold during call");
+    private async void OnBudsOnAnswerOrEndClicked(object? sender, RoutedEventArgs e) =>
+        await SetBudsOnTouchpadOptionAsync(sender, BudsOnDiagnostics.Option.AnswerOrEnd);
 
-    private async void OnTestBudsOnDeclineAndMediaClicked(object? sender, RoutedEventArgs e) =>
-        await RunBudsOnCallTestAsync(BudsOnDiagnostics.CallControl.DeclineAndMedia, "Decline call and Media controls");
+    private async void OnBudsOnDeclineClicked(object? sender, RoutedEventArgs e) =>
+        await SetBudsOnTouchpadOptionAsync(sender, BudsOnDiagnostics.Option.Decline);
 
-    private async Task RunBudsOnCallTestAsync(BudsOnDiagnostics.CallControl control, string label)
+    private async void OnBudsOnLeftHoldVolumeClicked(object? sender, RoutedEventArgs e) =>
+        await SetBudsOnTouchpadOptionAsync(sender, BudsOnDiagnostics.Option.LeftHoldVolume, "left");
+
+    private async void OnBudsOnRightHoldVolumeClicked(object? sender, RoutedEventArgs e) =>
+        await SetBudsOnTouchpadOptionAsync(sender, BudsOnDiagnostics.Option.RightHoldVolume, "right");
+
+    private async Task SetBudsOnTouchpadOptionAsync(object? sender, BudsOnDiagnostics.Option option,
+        string? holdSide = null)
     {
-        if (_budsOnCallTestOpen || TopLevel.GetTopLevel(this) is not { } host)
+        if (sender is not Button { CommandParameter: bool desired } ||
+            ViewModel is not { IsBudsOnTouchpadBusy: false } viewModel)
             return;
 
         var bluetooth = BluetoothImpl.Instance;
         var device = bluetooth.Device.Current;
-        if (device == null || !bluetooth.IsBudsOnCallTestDevice(device))
+        if (device == null || !bluetooth.IsBudsOnSettingsDevice(device))
             return;
 
-        _budsOnCallTestOpen = true;
+        if (BudsOnDiagnostics.GetControlValue(device, option) != !desired)
+        {
+            viewModel.RefreshBudsOnTouchpad();
+            viewModel.BudsOnTouchpadResult = "Check the current setting and try again.";
+            return;
+        }
+
+        viewModel.IsBudsOnTouchpadBusy = true;
         try
         {
-            if (BudsOnDiagnostics.GetCallTestSample(device) is not { } sample)
+            if (holdSide is not null)
             {
-                await new MessageBox
+                if (TopLevel.GetTopLevel(this) is not { } host)
+                    return;
+
+                var target = desired ? "on" : "off";
+                var dialog = new FAContentDialog
                 {
-                    Title = "Fresh earbuds status needed",
-                    Description = "Reconnect your Buds On, then open this test as soon as the call settings appear."
-                }.ShowAsync();
-                return;
+                    Title = $"Volume on {holdSide} hold",
+                    Content = $"This experimental change turns {target} volume control when you hold the {holdSide} earbud. You can reverse it here after the earbuds report the new state.",
+                    PrimaryButtonText = $"Turn {target}",
+                    CloseButtonText = "Cancel",
+                    DefaultButton = FAContentDialogButton.Close
+                };
+                if (await dialog.ShowAsync(host) != FAContentDialogResult.Primary)
+                    return;
             }
 
-            var combined = control == BudsOnDiagnostics.CallControl.DeclineAndMedia;
-            var mask = (byte)control;
-            if (combined && (sample.Flags & mask) != mask)
-            {
-                await new MessageBox
-                {
-                    Title = "Decline call and Media controls test",
-                    Description = "This test starts with Decline call and all Media controls On. Check both settings on your Galaxy, then reconnect."
-                }.ShowAsync();
-                return;
-            }
-
-            var target = sample.IsOn(control) ? "Off" : "On";
-            var dialog = new FAContentDialog
-            {
-                Title = $"Test {label}",
-                Content = combined
-                    ? "Confirm these are your Galaxy Buds On (SM-U600). One Bluetooth command turns off Decline call and Media controls together. Check both on your Galaxy, then turn both back on."
-                    : $"Confirm these are your Galaxy Buds On (SM-U600). This sends one Bluetooth command to turn the setting {target}. Check the setting on your Galaxy afterward.",
-                PrimaryButtonText = combined ? "Turn both off once" : $"Set {target} once",
-                CloseButtonText = "Cancel",
-                DefaultButton = FAContentDialogButton.Close
-            };
-            if (await dialog.ShowAsync(host) != FAContentDialogResult.Primary)
-                return;
-
-            await new MessageBox
-            {
-                Title = combined ? "Decline call and Media controls test" : "Call control test",
-                Description = await bluetooth.TestBudsOnCallAsync(device, sample, control)
-            }.ShowAsync();
+            viewModel.BudsOnTouchpadResult = "Applying change…";
+            var result = await bluetooth.SetBudsOnOptionAsync(device, option, desired);
+            if (ReferenceEquals(bluetooth.Device.Current, device))
+                viewModel.BudsOnTouchpadResult = result;
         }
         finally
         {
-            _budsOnCallTestOpen = false;
+            viewModel.IsBudsOnTouchpadBusy = false;
+            viewModel.RefreshBudsOnTouchpad();
+        }
+    }
+
+    private async void OnRefreshBudsOnTouchpadClicked(object? sender, RoutedEventArgs e)
+    {
+        if (ViewModel is not { IsBudsOnTouchpadBusy: false } viewModel)
+            return;
+
+        var bluetooth = BluetoothImpl.Instance;
+        var device = bluetooth.Device.Current;
+        if (device == null || !bluetooth.IsBudsOnSettingsDevice(device))
+            return;
+
+        viewModel.IsBudsOnTouchpadBusy = true;
+        viewModel.BudsOnTouchpadResult = "Refreshing status…";
+        try
+        {
+            var result = await bluetooth.RefreshBudsOnStatusAsync(device);
+            if (ReferenceEquals(bluetooth.Device.Current, device))
+                viewModel.BudsOnTouchpadResult = result;
+        }
+        finally
+        {
+            viewModel.IsBudsOnTouchpadBusy = false;
+            viewModel.RefreshBudsOnTouchpad();
         }
     }
 
@@ -1867,12 +2607,15 @@ replace_once(equalizer_view,
                                                  Description="{Binding BudsOnEqualizerDescription, Mode=OneWay}"
                                                  Symbol="DeviceEq" />
                 </controls:SettingsGroup>
-                <Button Content="Test an EQ preset…"
-                        IsEnabled="{Binding CanTestBudsOnEqualizer}"
-                        Click="OnTestBudsOnEqualizerClicked" />
+                <Button Content="Change preset…"
+                        IsEnabled="{Binding CanSetBudsOnEqualizer}"
+                        Click="OnSetBudsOnEqualizerClicked" />
                 <TextBlock IsVisible="{Binding IsBudsOnCustomEqualizer}"
-                           Text="Select a standard preset on your Galaxy before testing."
+                           Text="Select a standard preset on your Galaxy to change presets here."
                            TextWrapping="Wrap" />
+                <Button Content="View custom EQ curves…"
+                        IsEnabled="{Binding CanReadBudsOnEqualizerCurves}"
+                        Click="OnReadBudsOnEqualizerCurvesClicked" />
             </StackPanel>
 
             <controls:SettingsGroup IsVisible="{Binding !IsBudsOnEqualizer}">
@@ -1889,7 +2632,8 @@ replace_once(equalizer_vm,
     private byte? _budsOnEqualizerPreset;
 
     public bool IsBudsOnEqualizer { get; private set; }
-    public bool CanTestBudsOnEqualizer => IsBudsOnEqualizer && _budsOnEqualizerPreset is <= 5;
+    public bool CanSetBudsOnEqualizer => IsBudsOnEqualizer && _budsOnEqualizerPreset is <= 5;
+    public bool CanReadBudsOnEqualizerCurves { get; private set; }
     public bool IsBudsOnCustomEqualizer => IsBudsOnEqualizer && _budsOnEqualizerPreset == 6;
     public string BudsOnEqualizerDescription => _budsOnEqualizerPreset is { } preset
         ? BudsOnDiagnostics.GetEqualizerPresetName(preset) ?? "Unknown preset"
@@ -1918,18 +2662,22 @@ replace_once(equalizer_vm,
         var bluetooth = BluetoothImpl.Instance;
         var device = bluetooth.Device.Current;
         var isBudsOn = device?.Model == Models.BudsOn;
-        var preset = device is not null && isBudsOn && bluetooth.IsBudsOnCallTestDevice(device)
+        var canReadCurves = device is not null && isBudsOn && bluetooth.IsBudsOnSettingsDevice(device);
+        var preset = device is not null && canReadCurves
             ? BudsOnDiagnostics.GetEqualizerPreset(device)
             : null;
-        if (IsBudsOnEqualizer == isBudsOn && _budsOnEqualizerPreset == preset)
+        if (IsBudsOnEqualizer == isBudsOn && _budsOnEqualizerPreset == preset &&
+            CanReadBudsOnEqualizerCurves == canReadCurves)
             return;
 
         IsBudsOnEqualizer = isBudsOn;
         _budsOnEqualizerPreset = preset;
+        CanReadBudsOnEqualizerCurves = canReadCurves;
         this.RaisePropertyChanged(nameof(IsBudsOnEqualizer));
         this.RaisePropertyChanged(nameof(BudsOnEqualizerDescription));
-        this.RaisePropertyChanged(nameof(CanTestBudsOnEqualizer));
+        this.RaisePropertyChanged(nameof(CanSetBudsOnEqualizer));
         this.RaisePropertyChanged(nameof(IsBudsOnCustomEqualizer));
+        this.RaisePropertyChanged(nameof(CanReadBudsOnEqualizerCurves));
     }
 
     private void OnAnyMessageDecoded(object? sender, BaseMessageDecoder decoder)
@@ -1968,7 +2716,7 @@ using Serilog;
 ''')
 replace_once(equalizer_code,
     '    public EqualizerPage()\n',
-    '''    private bool _budsOnEqualizerTestOpen;
+    '''    private bool _budsOnEqualizerActionOpen;
 
     public EqualizerPage()
 ''')
@@ -1977,21 +2725,35 @@ replace_once(equalizer_code,
     '''        InitializeComponent();
     }
 
-    private async void OnTestBudsOnEqualizerClicked(object? sender, RoutedEventArgs e)
+    private async void OnSetBudsOnEqualizerClicked(object? sender, RoutedEventArgs e)
     {
-        if (_budsOnEqualizerTestOpen || TopLevel.GetTopLevel(this) is not { } host)
+        if (_budsOnEqualizerActionOpen || TopLevel.GetTopLevel(this) is not { } host)
             return;
 
         var bluetooth = BluetoothImpl.Instance;
         var device = bluetooth.Device.Current;
-        if (device == null || !bluetooth.IsBudsOnCallTestDevice(device))
+        if (device == null || !bluetooth.IsBudsOnSettingsDevice(device))
             return;
 
-        _budsOnEqualizerTestOpen = true;
+        _budsOnEqualizerActionOpen = true;
         try
         {
-            if (BudsOnDiagnostics.GetEqualizerTestSample(device) is not { } sample ||
-                sample.Preset > 5 ||
+            if (bluetooth.BudsOnReadOnly)
+            {
+                await new MessageBox
+                {
+                    Title = "Buds On is in read-only mode",
+                    Description = "You can turn off read-only mode in Settings."
+                }.ShowAsync();
+                return;
+            }
+
+            var current = BudsOnDiagnostics.GetEqualizerTestSample(device);
+            if (current == null && BudsOnDiagnostics.GetEqualizerPreset(device) is <= 5 &&
+                await bluetooth.RefreshBudsOnStatusAsync(device) == null)
+                current = BudsOnDiagnostics.GetEqualizerTestSample(device);
+
+            if (current is not { } sample ||
                 BudsOnDiagnostics.GetEqualizerPresetName(sample.Preset) is not { } currentName)
             {
                 await new MessageBox
@@ -2020,7 +2782,7 @@ replace_once(equalizer_code,
             };
             var dialog = new FAContentDialog
             {
-                Title = "Test Buds On equalizer",
+                Title = "Change preset",
                 Content = new StackPanel
                 {
                     Spacing = 8,
@@ -2028,13 +2790,13 @@ replace_once(equalizer_code,
                     {
                         new TextBlock
                         {
-                            Text = $"Your earbuds report {currentName}. Select a different preset to test. This sends one Bluetooth command.",
+                            Text = $"Your earbuds report {currentName}. Choose a different preset.",
                             TextWrapping = TextWrapping.Wrap
                         },
                         picker
                     }
                 },
-                PrimaryButtonText = "Set preset once",
+                PrimaryButtonText = "Apply preset",
                 CloseButtonText = "Cancel",
                 DefaultButton = FAContentDialogButton.Close
             };
@@ -2042,27 +2804,69 @@ replace_once(equalizer_code,
                 (uint)picker.SelectedIndex >= (uint)choices.Count)
                 return;
 
-            var outcome = await bluetooth.TestBudsOnEqualizerAsync(device, sample, choices[picker.SelectedIndex].Preset);
+            var outcome = await bluetooth.SetBudsOnEqualizerAsync(device, sample, choices[picker.SelectedIndex].Preset);
             await new MessageBox
             {
-                Title = "Equalizer test",
-                Description = $"{outcome} On your Galaxy, verify the new preset, then restore {currentName}."
+                Title = "Equalizer preset",
+                Description = outcome
             }.ShowAsync();
         }
         catch (Exception ex)
         {
-            Log.Error(ex, "Buds On equalizer test failed");
+            Log.Error(ex, "Buds On preset change failed");
             await new MessageBox
             {
-                Title = "Equalizer test interrupted",
+                Title = "Preset change interrupted",
                 Description = "Check the current preset on your Galaxy."
             }.ShowAsync();
         }
         finally
         {
-            _budsOnEqualizerTestOpen = false;
+            _budsOnEqualizerActionOpen = false;
+        }
+    }
+
+    private async void OnReadBudsOnEqualizerCurvesClicked(object? sender, RoutedEventArgs e)
+    {
+        if (_budsOnEqualizerActionOpen || TopLevel.GetTopLevel(this) is not { } host)
+            return;
+
+        var bluetooth = BluetoothImpl.Instance;
+        var device = bluetooth.Device.Current;
+        if (device == null || !bluetooth.IsBudsOnSettingsDevice(device))
+            return;
+
+        _budsOnEqualizerActionOpen = true;
+        try
+        {
+            var summary = await bluetooth.ReadBudsOnEqualizerCurvesAsync(device);
+            var dialog = new FAContentDialog
+            {
+                Title = "Custom EQ curves",
+                Content = new ScrollViewer
+                {
+                    MaxHeight = 400,
+                    Content = new TextBlock { Text = summary, TextWrapping = TextWrapping.Wrap }
+                },
+                CloseButtonText = "Close",
+                DefaultButton = FAContentDialogButton.Close
+            };
+            await dialog.ShowAsync(host);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Buds On custom EQ read failed");
+            await new MessageBox
+            {
+                Title = "Could not read custom EQ curves",
+                Description = "Reconnect your Buds On and try again."
+            }.ShowAsync();
+        }
+        finally
+        {
+            _budsOnEqualizerActionOpen = false;
         }
     }
 ''')
 
-print('Done. Buds On diagnostics and one-shot touch and EQ tests enabled.')
+print('Done. Galaxy Buds On settings and diagnostics enabled.')
