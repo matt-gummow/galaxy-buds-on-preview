@@ -1,6 +1,8 @@
 package dev.budson.overlap.probe;
 
 import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothA2dp;
+import android.bluetooth.BluetoothHeadset;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
@@ -14,7 +16,9 @@ import android.os.Looper;
 public final class Probe extends BroadcastReceiver {
     @Override
     public void onReceive(Context context, Intent intent) {
-        if (!isOrderedBroadcast() || !"dev.budson.overlap.probe.READ".equals(intent.getAction())) return;
+        String action = intent.getAction();
+        boolean audio = "dev.budson.overlap.probe.READ_AUDIO".equals(action);
+        if (!isOrderedBroadcast() || (!audio && !"dev.budson.overlap.probe.READ".equals(action))) return;
         String peer = intent.getStringExtra("peer");
         String request = intent.getStringExtra("request");
         if (!BluetoothAdapter.checkBluetoothAddress(peer) || request == null ||
@@ -36,14 +40,19 @@ public final class Probe extends BroadcastReceiver {
             bonded = null;
         }
         if (bonded == null) {
-            complete(pending, request, "unknown", "unknown");
+            complete(pending, request, audio, "unknown", "unknown", "unknown", "unknown");
             return;
         }
-        new Snapshot(context.getApplicationContext(), adapter, bonded, pending, request).start();
+        new Snapshot(context.getApplicationContext(), adapter, bonded, pending, request, audio).start();
     }
 
-    private static void complete(PendingResult pending, String request, String a2dp, String headset) {
-        pending.setResultData("BO1:" + request + ":" + a2dp + ":" + headset);
+    private static void complete(PendingResult pending, String request, boolean audio, String a2dp,
+                                 String headset, String mediaPlaying, String callAudio) {
+        if (audio) {
+            pending.setResultData("BO2:" + request + ":" + a2dp + ":" + headset + ":" + mediaPlaying + ":" + callAudio);
+        } else {
+            pending.setResultData("BO1:" + request + ":" + a2dp + ":" + headset);
+        }
         pending.finish();
     }
 
@@ -54,6 +63,8 @@ public final class Probe extends BroadcastReceiver {
         private final BluetoothDevice device;
         private final PendingResult pending;
         private final String request;
+        private final boolean readAudio;
+        private String mediaPlaying = "unknown", callAudio = "unknown";
         private String a2dp, headset;
         private boolean finished;
         private final Runnable deadline = new Runnable() {
@@ -61,12 +72,13 @@ public final class Probe extends BroadcastReceiver {
         };
 
         Snapshot(Context context, BluetoothAdapter adapter, BluetoothDevice device,
-                 PendingResult pending, String request) {
+                 PendingResult pending, String request, boolean readAudio) {
             this.context = context;
             this.adapter = adapter;
             this.device = device;
             this.pending = pending;
             this.request = request;
+            this.readAudio = readAudio;
         }
 
         void start() {
@@ -89,7 +101,10 @@ public final class Probe extends BroadcastReceiver {
             try {
                 if (!finished && adapter.isEnabled() && device.getBondState() == BluetoothDevice.BOND_BONDED) {
                     int state = proxy.getConnectionState(device);
-                    if (state == BluetoothProfile.STATE_CONNECTED) result = "connected";
+                    if (state == BluetoothProfile.STATE_CONNECTED) {
+                        result = "connected";
+                        if (readAudio) readAudioState(profile, proxy);
+                    }
                     if (state == BluetoothProfile.STATE_DISCONNECTED) result = "disconnected";
                 }
             } catch (RuntimeException unavailable) {
@@ -99,6 +114,16 @@ public final class Probe extends BroadcastReceiver {
                 catch (RuntimeException unavailable) { /* Service already closed. */ }
             }
             record(profile, result);
+        }
+
+        private void readAudioState(int profile, BluetoothProfile proxy) {
+            // A false audio result includes failure on some Android versions. Only a positive value confirms a route.
+            try {
+                if (profile == BluetoothProfile.A2DP && proxy instanceof BluetoothA2dp)
+                    mediaPlaying = ((BluetoothA2dp) proxy).isA2dpPlaying(device) ? "yes" : "unconfirmed";
+                if (profile == BluetoothProfile.HEADSET && proxy instanceof BluetoothHeadset)
+                    callAudio = ((BluetoothHeadset) proxy).isAudioConnected(device) ? "yes" : "unconfirmed";
+            } catch (RuntimeException unavailable) { /* Keep the successful profile query. */ }
         }
 
         @Override public void onServiceDisconnected(int profile) {
@@ -116,8 +141,9 @@ public final class Probe extends BroadcastReceiver {
             if (finished) return;
             finished = true;
             main.removeCallbacks(deadline);
-            complete(pending, request, a2dp == null ? "unknown" : a2dp,
-                    headset == null ? "unknown" : headset);
+            complete(pending, request, readAudio, a2dp == null ? "unknown" : a2dp,
+                    headset == null ? "unknown" : headset, mediaPlaying, callAudio);
         }
     }
 }
+

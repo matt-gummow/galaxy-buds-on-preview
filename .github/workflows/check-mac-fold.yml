@@ -1,0 +1,53 @@
+name: Mac and Fold switch recorder
+on:
+  push:
+    branches: [diagnostics/buds-on-control-trace]
+    paths:
+      - 'tools/mac-fold/**'
+      - 'tools/buds-on-overlap/build/**'
+      - '.github/workflows/check-mac-fold.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  android-helper:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and sign the temporary Fold reader
+        shell: powershell
+        run: |
+          $apk = Join-Path $env:RUNNER_TEMP 'BudsOverlap.apk'
+          & './tools/buds-on-overlap/build/Build-FoldFallback.ps1' -OutputApk $apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fold-profile-helper
+          path: ${{ runner.temp }}/BudsOverlap.apk
+          if-no-files-found: error
+          retention-days: 1
+
+  mac-apple-silicon:
+    needs: android-helper
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: fold-profile-helper
+          path: ${{ runner.temp }}/mac-fold-helper
+      - name: Verify macOS recorder and Fold adapter
+        shell: bash
+        working-directory: tools/mac-fold
+        run: |
+          /bin/bash tests/test_fold.sh
+          /bin/bash tests/test_capture.sh
+      - name: Build the Apple Silicon probe and verify the extracted archive
+        shell: bash
+        run: |
+          /bin/bash tools/mac-fold/build-kit.sh "$RUNNER_TEMP/mac-fold-helper/BudsOverlap.apk" "$RUNNER_TEMP/Mac-Fold-Switch-Test.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Mac-Fold-Switch-Test
+          path: ${{ runner.temp }}/Mac-Fold-Switch-Test.zip
+          if-no-files-found: error
+          compression-level: 0
