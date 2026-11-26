@@ -81,6 +81,20 @@
 }
 @end
 
+static Peer *PairedBuds(void) {
+    Peer *peer = [Peer new];
+    peer.addressString = @"01-AB-02-CD-03-EF";
+    Record *selected = [Record new];
+    selected.number = 7;
+    selected.matches = YES;
+    peer.lookup = selected;
+    peer.services = @[selected];
+    peer.channel = [Channel new];
+    peer.channel.peer = peer;
+    peer.synchronous = YES;
+    return peer;
+}
+
 @interface Rig : DirectTransport
 @property(strong) Peer *peer;
 @property(strong) id settings;
@@ -90,16 +104,7 @@
 @implementation Rig
 - (instancetype)init {
     if ((self = [super init])) {
-        _peer = [Peer new];
-        _peer.addressString = @"01-AB-02-CD-03-EF";
-        Record *selected = [Record new];
-        selected.number = 7;
-        selected.matches = YES;
-        _peer.lookup = selected;
-        _peer.services = @[selected];
-        _peer.channel = [Channel new];
-        _peer.channel.peer = _peer;
-        _peer.synchronous = YES;
+        _peer = PairedBuds();
         _paired = @[_peer];
         NSString *address = @"01:ab:02:cd:03:ef";
         _settings = @{@"LastDeviceMac":address, @"Devices":@[@{@"Model":@14, @"MacAddress":address}]};
@@ -127,7 +132,59 @@ static void Refused(Rig *rig) {
     NSCAssert(rig.peer.opens == 0 && [rig.steps isEqual:@[@"failed"]], @"Should refuse without opening");
 }
 
+static void ExpectOpen(Rig *rig) {
+    NSCAssert(![rig preflight], @"Expected a usable cached service");
+    for (Peer *peer in rig.paired) {
+        NSCAssert(!peer.opens, @"Preflight must be passive");
+    }
+    [rig begin];
+    Drain();
+    NSCAssert(([rig.steps isEqual:@[@"opening", @"opened"]]), @"Expected one confirmed channel open");
+    [rig stop];
+}
+
+static void TestDuplicatePairedRows(void) {
+    Rig *rig = [Rig new];
+    rig.paired = @[rig.peer, rig.peer];
+    ExpectOpen(rig);
+    NSCAssert(rig.peer.opens == 1, @"Duplicate references should result in one open");
+
+    rig = [Rig new];
+    Peer *alias = PairedBuds();
+    alias.addressString = @"01:ab:02:cd:03:ef";
+    rig.paired = @[rig.peer, alias];
+    ExpectOpen(rig);
+    NSCAssert(rig.peer.opens + alias.opens == 1, @"Equivalent paired rows should result in one open");
+
+    for (unsigned aliasFirst = 0; aliasFirst < 2; ++aliasFirst) {
+        rig = [Rig new];
+        alias = PairedBuds();
+        alias.services = @[];
+        alias.lookup = nil;
+        rig.paired = aliasFirst ? @[alias, rig.peer] : @[rig.peer, alias];
+        ExpectOpen(rig);
+        NSCAssert(rig.peer.opens == 1 && !alias.opens, @"Only the row with the verified service may open");
+
+        rig = [Rig new];
+        alias = PairedBuds();
+        alias.lookup.number = 11;
+        rig.paired = aliasFirst ? @[alias, rig.peer] : @[rig.peer, alias];
+        Refused(rig);
+        NSCAssert(!alias.opens, @"Conflicting cached channel numbers must prevent both opens");
+
+        rig = [Rig new];
+        alias = PairedBuds();
+        Record *competingService = [Record new];
+        competingService.number = alias.lookup.number;
+        alias.services = @[alias.lookup, competingService];
+        rig.paired = aliasFirst ? @[alias, rig.peer] : @[rig.peer, alias];
+        Refused(rig);
+        NSCAssert(!alias.opens, @"A contradictory cache must not be treated as missing");
+    }
+}
+
 int main(void) { @autoreleasepool {
+    TestDuplicatePairedRows();
     Rig *rig = [Rig new];
     NSCAssert(![rig preflight] && !rig.peer.opens, @"Preflight must be passive");
     [rig begin]; Drain();

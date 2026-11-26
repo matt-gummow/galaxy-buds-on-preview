@@ -38,7 +38,8 @@ static NSTextField *label(NSString *text, CGFloat size, NSFontWeight weight) {
                                               styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                                                         NSWindowStyleMaskMiniaturizable
                                                 backing:NSBackingStoreBuffered defer:NO];
-    self.window.title = @"Buds On Connection Check";
+    self.window.title = [NSString stringWithFormat:@"Buds On Connection Check %@",
+                         [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"]];
     self.window.delegate = self;
     self.window.releasedWhenClosed = NO;
 
@@ -183,7 +184,8 @@ static NSTextField *label(NSString *text, CGFloat size, NSFontWeight weight) {
 
 - (void)copyReport:(id)sender {
     NSString *body = [self.events componentsJoinedByString:@"\n"];
-    NSString *report = [NSString stringWithFormat:@"Buds On Connection Check 1.0\nChannel opened: %@\n%@\n%@",
+    NSString *report = [NSString stringWithFormat:@"Buds On Connection Check %@\nChannel opened: %@\n%@\n%@",
+                        [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"],
                         self.opened ? @"yes" : @"unconfirmed", body,
                         self.reported ? @"Listener observation recorded." : (self.attempted ? @"Listener observation pending." : @"No opening attempt was made.")];
     NSPasteboard *pasteboard = NSPasteboard.generalPasteboard;

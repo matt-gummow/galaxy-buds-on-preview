@@ -16,6 +16,6 @@ xcrun clang -fobjc-arc -fblocks -O2 -Wall -Wextra -arch arm64 -mmacosx-version-m
 /usr/bin/codesign --verify --strict "$bundle"
 /usr/bin/lipo -verify_arch arm64 "$bundle/Contents/MacOS/BudsOnConnectionCheck"
 /usr/bin/pkgbuild --component "$bundle" --install-location /Applications \
-  --identifier io.github.matt-gummow.budson-direct-check --version 1.0 \
+  --identifier io.github.matt-gummow.budson-direct-check --version "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$bundle/Contents/Info.plist")" \
   "$output_dir/Buds-On-Connection-Check-arm64.pkg"
 (cd "$output_dir" && /usr/bin/shasum -a 256 Buds-On-Connection-Check-arm64.pkg > SHA256.txt)

@@ -42,14 +42,17 @@ static BOOL SameRecord(IOBluetoothSDPServiceRecord *a, IOBluetoothSDPServiceReco
            [b getServiceRecordHandle:&second] == kIOReturnSuccess && first && first == second;
 }
 
-static NSString *FindCachedChannel(IOBluetoothDevice *device, BluetoothRFCOMMChannelID *number) {
+static NSString *FindCachedChannel(IOBluetoothDevice *device, BluetoothRFCOMMChannelID *number, BOOL *missing) {
+    *missing = NO;
     const UInt8 bytes[] = {0xf8, 0x62, 0x06, 0x74, 0xa1, 0xed, 0x41, 0xab,
                            0xa8, 0xb9, 0xde, 0x9a, 0xd6, 0x55, 0x72, 0x9d};
     IOBluetoothSDPUUID *uuid = [IOBluetoothSDPUUID uuidWithBytes:bytes length:sizeof(bytes)];
     NSArray *records = device.services;
-    if (!records.count) return @"macOS provided no cached services for the paired Buds.";
+    if (!records.count) {
+        *missing = YES;
+        return @"macOS provided no cached services for the paired Buds.";
+    }
     IOBluetoothSDPServiceRecord *lookup = [device getServiceRecordForUUID:uuid];
-    if (!lookup) return @"macOS could not find Samsung’s control UUID in the cached services.";
     IOBluetoothSDPServiceRecord *match = nil;
     NSUInteger matches = 0;
     unsigned uses[31] = {};
@@ -60,6 +63,10 @@ static NSString *FindCachedChannel(IOBluetoothDevice *device, BluetoothRFCOMMCha
             match = record;
             ++matches;
         }
+    }
+    if (!matches && !lookup) {
+        *missing = YES;
+        return @"macOS could not find Samsung’s control UUID in the cached services.";
     }
     if (!matches) return @"The cached service list could not confirm the Samsung control UUID lookup.";
     if (matches > 1) return [NSString stringWithFormat:@"%lu cached records contain Samsung’s control UUID.", (unsigned long)matches];
@@ -115,13 +122,27 @@ static NSString *FindCachedChannel(IOBluetoothDevice *device, BluetoothRFCOMMCha
     _number = 0;
     _key = SelectedPeerKey([self clientSettings]);
     if (!_key) return @"The client settings do not identify one selected Galaxy Buds On.";
+    NSString *unavailable = @"The selected Buds On are absent from the Mac’s paired-device list. Check Bluetooth access for this diagnostic.";
     for (IOBluetoothDevice *device in [self pairedDevices]) {
         if (![_key isEqual:PeerKey(device.addressString)]) continue;
-        if (_peer) return @"macOS lists more than one matching paired device.";
-        _peer = device;
+
+        // macOS may list the same address more than once, with different cached services.
+        BluetoothRFCOMMChannelID number = 0;
+        BOOL missing;
+        NSString *reason = FindCachedChannel(device, &number, &missing);
+        if (missing) {
+            unavailable = reason;
+            continue;
+        }
+        if (reason) return reason;
+        if (_peer && _number != number)
+            return @"Cached records for the same Buds On disagree about Samsung’s control channel.";
+        if (!_peer) {
+            _peer = device;
+            _number = number;
+        }
     }
-    if (!_peer) return @"The selected Buds On are absent from the Mac’s paired-device list. Check Bluetooth access for this diagnostic.";
-    return FindCachedChannel(_peer, &_number);
+    return _peer ? nil : unavailable;
 }
 
 - (NSString *)preflight {

@@ -6,8 +6,8 @@
 <key>CFBundleDisplayName</key><string>Buds On Connection Check</string>
 <key>CFBundleExecutable</key><string>BudsOnConnectionCheck</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.0</string>
-<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>1.1</string>
+<key>CFBundleVersion</key><string>2</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSBluetoothAlwaysUsageDescription</key><string>Check whether opening your paired Buds On control channel interrupts phone playback. No earbud settings or firmware are changed.</string>
