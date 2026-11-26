@@ -74,7 +74,10 @@ public sealed class BudsSession
         while (pos < bytes.Count)
         {
             bool alternative = bytes[pos] == 0xfc;
-            if (!alternative && bytes[pos] != 0xfd)
+            // The Buds4 Pro manual handoff tool uses FE/EE on the regular channel.
+            // Only check handoff evidence inside that additional frame family.
+            bool handoffOnly = bytes[pos] == 0xfe;
+            if (!alternative && !handoffOnly && bytes[pos] != 0xfd)
             {
                 settings.Interrupt(time, channelId, dlci);
                 pos++;
@@ -92,7 +95,8 @@ public sealed class BudsSession
             int size = body + 4;
             if (bytes.Count - pos < size) break;
             int check = pos + size - 3;
-            if (bytes[check + 2] != (alternative ? 0xcc : 0xdd) ||
+            byte end = alternative ? (byte)0xcc : handoffOnly ? (byte)0xee : (byte)0xdd;
+            if (bytes[check + 2] != end ||
                 Crc(bytes, pos + 3, check) != (bytes[check] | (bytes[check + 1] << 8)))
             {
                 settings.Interrupt(time, channelId, dlci);
@@ -102,7 +106,7 @@ public sealed class BudsSession
             if (alternative) smepFrames++; else sppFrames++;
             int id = bytes[pos + 3];
             bool wireTypeBit = (header & 0x1000) != 0;
-            int messageKey = id | (alternative ? 256 : 0) | (wireTypeBit ? 512 : 0);
+            int messageKey = id | (alternative ? 256 : 0) | (wireTypeBit ? 512 : 0) | (handoffOnly ? 1024 : 0);
             if ((header & 0x2000) != 0)
             {
                 settings.Interrupt(time, channelId, dlci);
@@ -129,7 +133,7 @@ public sealed class BudsSession
                 bool overlap = stream.Fragments.Count != 0 || (mux.Streams.TryGetValue(key ^ 1, out opposite) &&
                     (opposite.Bytes.Count != 0 || opposite.Fragments.Count != 0));
                 settings.Frame(time, fromBook, channelId, dlci, alternative, id, wireTypeBit,
-                    bytes.GetRange(pos + 4, body - 3).ToArray(), service, overlap);
+                    bytes.GetRange(pos + 4, body - 3).ToArray(), service, overlap, handoffOnly);
             }
             pos += size;
         }

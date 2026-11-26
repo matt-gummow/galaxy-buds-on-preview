@@ -10,7 +10,8 @@ public sealed class ObservedSettings
     private readonly DateTimeOffset origin;
     private readonly TextWriter output;
     private int direct, version, status, versionReports, otherPropertyWrites, related, acknowledgements, omitted;
-    private readonly int[] shown = new int[8];
+    private int vendorHandoff, standardHandoff, unboundHandoff, announcements;
+    private readonly int[] shown = new int[10];
     private const int MaxEvidenceLines = 48;
     private static readonly TimeSpan ComparisonWindow = TimeSpan.FromSeconds(5);
 
@@ -88,8 +89,41 @@ public sealed class ObservedSettings
         return ", version-field comparison inconclusive";
     }
 
+    // Reference forms from buds-sync.swift and budsctl.swift in hoshsadiq/buds4-pro-poc
+    // at be75d186314ed91fd078c549cd22befd8b639856.
+    // The vendor reference sets the wire type bit on a host-originated message.
+    // Host direction always comes independently from the captured HCI record.
+    private void ObserveHandoff(DateTimeOffset time, bool alternative, int id, bool wireTypeBit,
+                                byte[] payload, string service)
+    {
+        string expectedService = alternative ? "Samsung SMEP" : "Samsung SPP";
+        if (service != expectedService && service != "unconfirmed") return;
+
+        if (alternative && id == 1 && wireTypeBit && payload.Length == 2 &&
+            payload[0] == 0x71 && payload[1] == 1)
+        {
+            if (service == expectedService) vendorHandoff++; else unboundHandoff++;
+            Record(7, time, "Book sent a frame matching the vendor computer audio-handoff request shape", service);
+        }
+        else if (!alternative && id == 0x71 && !wireTypeBit && payload.Length == 1 && payload[0] == 1)
+        {
+            if (service == expectedService) standardHandoff++; else unboundHandoff++;
+            Record(8, time, "Book sent a frame matching the regular computer audio-handoff request shape", service);
+        }
+        else if (!alternative && id == 0x73 && !wireTypeBit && payload.Length == 17 &&
+                 payload[0] == 1 && (payload[1] == 1 || payload[1] == 2))
+        {
+            for (int i = 2; i < payload.Length; i++)
+                if (payload[i] != 0) return;
+            announcements++;
+            Record(9, time, "Book sent a frame matching the host transport announcement shape (" +
+                (payload[1] == 1 ? "Bluetooth" : "LE Audio") + ")", service);
+        }
+    }
+
     public void Frame(DateTimeOffset time, bool fromBook, int channelId, int dlci,
-        bool alternative, int messageId, bool response, byte[] payload, string service, bool overlap = false)
+        bool alternative, int messageId, bool response, byte[] payload, string service, bool overlap = false,
+        bool handoffOnly = false)
     {
         bool confirmed = service == "Samsung SMEP";
         if (!confirmed || overlap) Interrupt(time, channelId, dlci);
@@ -97,6 +131,8 @@ public sealed class ObservedSettings
                              payload[0] == 0x43;
         if (fromBook && !propertyWrite) Interrupt(time, channelId, dlci);
         if (payload == null) return;
+        if (fromBook) ObserveHandoff(time, alternative, messageId, response, payload, service);
+        if (handoffOnly) return;
         if (alternative)
         {
             if (service == "Samsung SPP" || messageId != 1 || payload.Length < 1) return;
@@ -164,6 +200,13 @@ public sealed class ObservedSettings
 
     public void Finish()
     {
+        output.WriteLine("Book audio-handoff request shapes on SDP-matched services: vendor {0}, regular {1}. Matching shapes on an unconfirmed service: {2}.",
+            vendorHandoff, standardHandoff, unboundHandoff);
+        output.WriteLine("Host transport announcement shapes (context only) = {0}.", announcements);
+        if (vendorHandoff + standardHandoff + unboundHandoff == 0)
+            output.WriteLine("Neither reference handoff request shape was observed in this interval. Incomplete capture, other formats, or other transports can hide a handoff.");
+        else
+            output.WriteLine("A request-shape match identifies a Book transmission. Its effect on Buds On, audio movement, and simultaneous phone connectivity remain unverified by that frame.");
         output.WriteLine("Book multipoint-setting format matches = {0}; MDE version writes = {1}; separate seamless-setting matches = {2}.",
             direct, version, related);
         output.WriteLine("Buds status reports = {0}; MDE notifications = {1}; other Book SMEP property writes = {2}.",

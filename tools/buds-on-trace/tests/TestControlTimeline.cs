@@ -152,6 +152,91 @@ public static class TestControlTimeline
             throw new Exception("Comparison crossed a DLCI boundary.");
     }
 
+    private static void CheckHandoffEvidence(DateTimeOffset origin)
+    {
+        byte[] vendor = Hex("fc 05 10 01 71 01 79 1c cc");
+        byte[] regular = Hex("fe 04 00 71 01 49 2b ee");
+        byte[] regularOn = Frame(false, 0x71, 1);
+        var report = new StringWriter();
+        var s = new BudsSession(origin, report);
+        Action<bool,byte[]> feed = (book, bytes) => s.L2cap(origin, book, 3, 4, Serial(bytes));
+        feed(true, vendor); // exact match, but SDP did not establish the service
+        feed(true, regular);
+        feed(false, vendor);
+        feed(false, regular);
+        byte[] changed = (byte[])vendor.Clone();
+        changed[2] = 0; // wrong wire type despite correct host direction
+        feed(true, changed);
+        changed = (byte[])regular.Clone();
+        changed[2] = 16;
+        feed(true, changed);
+        changed = (byte[])regular.Clone();
+        changed[5] ^= 1;
+        feed(true, changed);
+        changed = (byte[])regular.Clone();
+        changed[changed.Length-1] = 0xdd;
+        feed(true, changed);
+        changed = (byte[])vendor.Clone();
+        changed[2] |= 32;
+        feed(true, changed);
+        feed(true, vendor); // tail of a logical fragment
+        feed(true, Frame(true, 1, 0x71, 1, 2));
+        feed(true, Frame(false, 0x71, 2));
+        feed(true, Frame(false, 0x72, 1));
+
+        string[] uuids = {
+            "f8 62 06 74 a1 ed 41 ab a8 b9 de 9a d6 55 72 9d",
+            "2e 73 a4 ad 33 2d 41 fc 90 e2 16 be f0 65 23 f2"
+        };
+        foreach (string uuid in uuids)
+        {
+            s.Finish();
+            s = new BudsSession(origin, report);
+            s.L2cap(origin, true, 1, 9, Hex("04 00 01 00 0e 00 00 01 22 ff ff 35 05 0a 00 00 ff ff 00"));
+            s.L2cap(origin, false, 1, 9, Hex("05 00 01 00 2c 00 29 35 27 09 00 01 35 11 1c " +
+                uuid + " 09 00 04 35 0c 35 03 19 01 00 35 05 19 00 03 08 01 00"));
+            s.L2cap(origin, true, 3, 4, Control(3, 0x3f));
+            s.L2cap(origin, false, 3, 4, Control(3, 0x73));
+            // Split across captured serial packets. Only the matching service counts.
+            feed(true, vendor.Take(5).ToArray());
+            feed(true, vendor.Skip(5).ToArray());
+            feed(true, regular.Take(2).ToArray());
+            feed(true, regular.Skip(2).ToArray());
+            feed(true, regularOn);
+            byte[] fields = new byte[17];
+            fields[0] = 1;
+            fields[1] = 2;
+            feed(true, Frame(false, 0x73, fields));
+            fields[1] = 1;
+            byte[] announced = Frame(false, 0x73, fields);
+            announced[0] = 0xfe;
+            announced[announced.Length - 1] = 0xee;
+            feed(true, announced);
+            feed(false, announced);
+            fields[16] = 1;
+            feed(true, Frame(false, 0x73, fields));
+            fields[16] = 0;
+            fields[1] = 3;
+            feed(true, Frame(false, 0x73, fields));
+        }
+        s.Finish();
+        string text = report.ToString();
+        if (!text.Contains("vendor 0, regular 0. Matching shapes on an unconfirmed service: 2.") ||
+            !text.Contains("vendor 1, regular 0. Matching shapes on an unconfirmed service: 0.") ||
+            !text.Contains("vendor 0, regular 2. Matching shapes on an unconfirmed service: 0.") ||
+            Occurrences(text, "matching the vendor computer") != 2 || Occurrences(text, "matching the regular computer") != 3 ||
+            Occurrences(text, "matching the host transport announcement shape") != 2 ||
+            !text.Contains("announcement shapes (context only) = 2."))
+            throw new Exception("Handoff framing, confidence, direction or transport context regression: " + text);
+        report = new StringWriter();
+        s = new BudsSession(origin, report);
+        feed(true, Frame(false, 0x73, new byte[17]));
+        feed(true, Frame(false, 0x72, 1));
+        s.Finish();
+        if (!report.ToString().Contains("Neither reference handoff request shape was observed"))
+            throw new Exception("Missing handoff coverage caveat.");
+    }
+
     public static int Main()
     {
         AudioEvidenceTest.Run();
@@ -202,6 +287,7 @@ public static class TestControlTimeline
             || !details.Contains("requested state off") || details.Contains("MARK"))
             throw new Exception("Version negotiation and status-only fixture check failed.");
         CheckVersionTimeline(time);
+        CheckHandoffEvidence(time);
         Console.WriteLine("Offline controller, RFCOMM, setting, and redaction checks passed.");
         return 0;
     }

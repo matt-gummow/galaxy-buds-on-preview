@@ -102,17 +102,17 @@ public static class AnalyzeSavedTrace
                 Console.WriteLine("Drag the original report, ETL, or their folder onto Read-Buds-Settings.cmd.");
                 return 1;
             }
-            string output = Path.Combine(capture.Folder, "Buds-On-version-check-" + Guid.NewGuid().ToString("N").Substring(0,8) + ".txt");
+            string output = Path.Combine(capture.Folder, "Buds-On-audio-handoff-" + Guid.NewGuid().ToString("N").Substring(0,8) + ".txt");
             Console.WriteLine("Reading the saved Galaxy Book trace. This can take a minute.");
             using (StreamWriter writer = new StreamWriter(new FileStream(output, FileMode.CreateNew, FileAccess.Write, FileShare.None)))
             {
-                writer.WriteLine("Galaxy Buds On | Galaxy Book version and audio check");
+                writer.WriteLine("Galaxy Buds On | Galaxy Book audio handoff check");
                 writer.WriteLine("Times are seconds from the original report start. Only the Book's Bluetooth link was captured. The Fold's simultaneous audio connection cannot be determined from this file.");
-                writer.WriteLine("The report checks captured classic Bluetooth audio connections and Samsung serial traffic. Other commands and low-energy connections can fall outside its coverage.");
+                writer.WriteLine("This check looks for a Book-to-Buds request matching a published Buds4 Pro audio-handoff format. It also reports audio channels, version messages and transport announcements when captured. A matching request cannot establish that it caused a switch. Other message formats, missing packets and low-energy connections can fall outside this scan.");
                 try { SavedBudsReader.Scan(capture.Etl, capture.Origin, writer); }
                 catch (Exception) { writer.WriteLine("Reading stopped. Any displayed matches form a partial timeline."); }
             }
-            Console.WriteLine("Share the selected Buds-On-version-check text file in chat. Keep the original ETL local.");
+            Console.WriteLine("Share the selected Buds-On-audio-handoff text file in chat. Keep the original ETL local.");
             try { Process.Start("explorer.exe", "/select,\"" + output + "\""); }
             catch (System.ComponentModel.Win32Exception) { Console.WriteLine("The summary is in the same folder as the original report."); }
             return 0;
