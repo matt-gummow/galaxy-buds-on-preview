@@ -8,6 +8,7 @@ on:
       - 'add_buds_on.py'
       - 'patches/buds-on-mac-handoff.patch'
       - 'tests/**'
+      - 'scripts/**'
   workflow_dispatch:
 
 permissions:
@@ -18,6 +19,8 @@ jobs:
     name: Build Apple Silicon .pkg
     runs-on: xcode-27
     timeout-minutes: 90
+    env:
+      NUGET_PACKAGES: ${{ runner.temp }}/budson-nuget
     steps:
       - name: Checkout diagnostic patch
         uses: actions/checkout@v7
@@ -28,6 +31,14 @@ jobs:
           repository: timschneeb/GalaxyBudsClient
           ref: 85dfc8bb39fc45d3c30ecf71ab2c663fb1d41729
           path: GalaxyBudsClient-source
+          persist-credentials: false
+
+      - name: Checkout pinned FluentAvalonia source
+        uses: actions/checkout@v7
+        with:
+          repository: amwx/FluentAvalonia
+          ref: 215ee0481e8b0e6d396cbe2a0f33dc791c5646ab
+          path: FluentAvalonia-source
           persist-credentials: false
 
       - name: Select Xcode 27.2 required by .NET macOS workload
@@ -57,7 +68,21 @@ jobs:
         run: |
           git apply --check "$GITHUB_WORKSPACE/patches/buds-on-mac-handoff.patch"
           git apply "$GITHUB_WORKSPACE/patches/buds-on-mac-handoff.patch"
+          python3 "$GITHUB_WORKSPACE/scripts/stamp_preview.py" "$PWD"
           bash "$GITHUB_WORKSPACE/tests/run-handoff-tests.sh" "$PWD"
+
+      - name: Fix and test empty control accessibility
+        shell: bash
+        run: |
+          python3 scripts/fix_fluentavalonia_accessibility.py \
+            FluentAvalonia-source "$RUNNER_TEMP/handoff-feed" "$RUNNER_TEMP/handoff-restore.config"
+          dotnet pack FluentAvalonia-source/src/FluentAvalonia/FluentAvalonia.csproj \
+            -c Release -o "$RUNNER_TEMP/handoff-feed" \
+            --source https://api.nuget.org/v3/index.json -p:GeneratePackageOnBuild=false
+          dotnet restore tests/RepeaterAccessibility/RepeaterAccessibility.csproj \
+            --configfile "$RUNNER_TEMP/handoff-restore.config"
+          dotnet run --project tests/RepeaterAccessibility/RepeaterAccessibility.csproj \
+            --no-restore -c Release
 
       - name: Build native macOS Bluetooth library
         shell: bash
@@ -86,7 +111,7 @@ jobs:
           dotnet restore \
             -p:UseMacOSSDK=true \
             -r osx-arm64 \
-            --configfile GalaxyBudsClient/nuget.config \
+            --configfile "$RUNNER_TEMP/handoff-restore.config" \
             GalaxyBudsClient/GalaxyBudsClient.csproj
 
       - name: Publish macOS Apple Silicon installer
