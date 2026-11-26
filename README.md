@@ -10,7 +10,9 @@ The workflow checks out upstream commit `85dfc8bb39fc45d3c30ecf71ab2c663fb1d4172
 
 ## Experimental Mac audio handoff
 
-[Download the Apple Silicon handoff preview](https://github.com/matt-gummow/galaxy-buds-on-preview/actions/runs/45882533046/artifacts/15147966780), unzip it and open `GalaxyBudsOn-Handoff-Preview-macOS-arm64.pkg`. The [GitHub Actions build](https://github.com/matt-gummow/galaxy-buds-on-preview/actions/runs/45882533046) passed the simulated transport tests and verified the arm64 app and native entry points inside the installer. The [experimental branch](https://github.com/matt-gummow/galaxy-buds-on-preview/tree/experimental/buds-on-mac-handoff) contains the code and workflow.
+Preview 2 is version **5.2.1.2**. Quit the running app after installing, then reopen it. Settings displays **Buds On handoff preview 2**. This build fixes an empty-control accessibility crash in its pinned FluentAvalonia dependency. The cloud build verifies empty and populated accessibility peers alongside the Bluetooth transport tests.
+
+[Download the Apple Silicon handoff preview](https://github.com/matt-gummow/galaxy-buds-on-preview/actions/runs/45893008917/artifacts/15152283106), unzip it and open `GalaxyBudsOn-Handoff-Preview-macOS-arm64.pkg`. The [GitHub Actions build](https://github.com/matt-gummow/galaxy-buds-on-preview/actions/runs/45893008917) passed the simulated transport tests and verified the arm64 app and native entry points inside the installer. The [experimental branch](https://github.com/matt-gummow/galaxy-buds-on-preview/tree/experimental/buds-on-mac-handoff) contains the code and workflow.
 
 A saved SM-U600 Galaxy Book capture shows the Book sending one computer audio handoff request on the Samsung SMEP service, 2.216 seconds after reconnecting. The frame matched the clear-flag `0x71` layout and passed its checksum. The recording does not reveal whether the Buds accepted it or whether the Fold stayed connected. Earlier settings and version messages have unverified fields on this model.
 
