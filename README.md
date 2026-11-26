@@ -1,56 +1,40 @@
-# Galaxy Buds On — experimental macOS diagnostic build
+# Galaxy Buds On for GalaxyBudsClient (macOS)
 
-This repository builds an **experimental Galaxy Buds On (SM-U600)** variant of [GalaxyBudsClient](https://github.com/timschneeb/GalaxyBudsClient) in GitHub Actions. It includes read-only diagnostics and explicitly confirmed one-shot touch and equalizer tests on macOS.
+This repository builds an Apple Silicon version of [GalaxyBudsClient](https://github.com/timschneeb/GalaxyBudsClient) for Galaxy Buds On (SM-U600). The app uses the Samsung management channel for device status and specific confirmed setting commands.
 
-## Build and download
+## Install
 
-1. Open the [Actions tab](https://github.com/matt-gummow/galaxy-buds-on-preview/actions) and select **Build Galaxy Buds On diagnostic app (macOS)**.
-2. Open the latest successful run. If no run appears, click **Run workflow**.
-3. Under **Artifacts**, download **GalaxyBudsOn-diagnostic-macos-arm64**.
-4. Unzip the downloaded artifact and install the included macOS Apple Silicon `.pkg`.
-5. The installer is unsigned. Only allow it in macOS Privacy & Security if you trust this repo and its upstream source.
+Open the latest successful [macOS build](https://github.com/matt-gummow/galaxy-buds-on-preview/actions). Download **GalaxyBudsOn-diagnostic-macos-arm64** under Artifacts, unzip it, and open the included `.pkg`. macOS may ask you to approve this unsigned installer. The build runs in GitHub Actions and requires no local Xcode or App Store sign-in.
 
-No local Xcode installation or Apple App Store sign-in is needed. The cloud workflow checks out upstream commit `85dfc8bb39fc45d3c30ecf71ab2c663fb1d41729`, applies `add_buds_on.py`, compiles the macOS native Bluetooth library, and publishes a `.pkg` with .NET 11.
+The workflow checks out upstream commit `85dfc8bb39fc45d3c30ecf71ab2c663fb1d41729`, applies `add_buds_on.py`, and builds the native Bluetooth library and app with the pinned cloud toolchain.
 
-## Run the read-only connection test
+## Using the app
 
-1. Connect Galaxy Buds On through macOS Bluetooth and open the preview. In GalaxyBudsClient, select **Galaxy Buds On** and click **Connect** if the app offers it.
-2. Wait about 15 seconds. Open the app's **Settings** and select **Copy Buds On connection report**, even if the app reports a connection error.
-3. Paste the report in your test conversation. It contains SDP service-class UUIDs, RFCOMM channels, connection results, incoming chunk sizes, and validated frame metadata. It excludes Bluetooth addresses, device names, and packet contents. The report covers the current app launch.
+| Page | Buds On support |
+| --- | --- |
+| **Home** | Left earbud, right earbud, and case battery from validated device status. The app groups matching earbud percentages and uses the macOS headset battery when available while waiting for device status. |
+| **Touchpad** | Media controls, Answer call or end call, and Decline call. These commands were confirmed on SM-U600 in the preceding hardware previews. Left and right volume hold are available for experimental testing when both hold actions are known. |
+| **Equalizer** | Six standard presets from Balanced through Treble boost. Preset writes passed a hardware test in the previous preview. A Custom curve can be read from the device when it returns a supported reply. Custom curve editing remains disabled. |
+| **Settings** | Experimental Gaming mode and Pause when one earbud is removed, a reversible read-only mode for the running app, and the connection report. |
 
-The preview also saves the report automatically as `~/Library/Application Support/GalaxyBudsClient/buds-on-connection-report.txt`. If Settings is unavailable, open that file after a connection attempt to read the same report.
+Pair the earbuds in macOS Bluetooth first and connect in GalaxyBudsClient. Changes are explicit actions on the selected device. The app checks the current status and can refresh the management channel to verify a change. It sends each setting command once and never retries a write automatically.
 
-## Check touch controls and EQ in one session
+Volume hold changes only the selected earbud and preserves the other side. This build supports the Off and Volume values. Actions assigned to an assistant or another behavior require using the phone. A mixed media control state is displayed as unavailable for editing. Active Custom EQ is protected from replacement.
 
-1. Connect the Buds On in the Mac app. On **Touchpad**, choose **Test Decline call and Media controls…**, then confirm **Turn both off once**. The button requires fresh status showing both settings fully on. If the button stays disabled after reconnecting, use **Test Touch and hold during call…** to test Decline by itself.
-2. On **Equalizer**, note the current preset and choose **Test an EQ preset…**. Pick a different standard preset and confirm **Set preset once**. If the app requests fresh status, reconnect in the Mac app and try the EQ test once more.
-3. Check both changes in the Galaxy phone’s Bluetooth device settings for Buds On. Confirm **Decline call** and **Media controls** are off if you ran the combined test, **Answer call or end call** kept its original value, and the EQ matches your selection. Restore your previous values on the phone.
-4. Reconnect to the Mac and choose **Settings → Copy Buds On connection report** to capture the restored state along with the test results.
+## Connection and multipoint
 
-Each confirmation sends a single command. The test dialogs distinguish a new status report from an acknowledgment. If both tests use the same status frame, a newer Bluetooth response must arrive between them. Samples expire after 60 seconds, and the app checks the selected device, session, and relevant status at send time. It never retries a command automatically.
+Open **Settings → Copy Buds On connection report** after connecting or attempting a connection. The same report is saved to `~/Library/Application Support/GalaxyBudsClient/buds-on-connection-report.txt`. It omits Bluetooth addresses and packet dumps.
 
-## Current support
+The report summarizes complete 8-byte `0x76` multipoint notices. It includes the firmware’s support flag, connection state, audio focus, and known streaming profiles. The final three unverified payload bytes are omitted. Those status fields cannot establish simultaneous audio connections to a specific pair of hosts by themselves. Samsung currently documents Auto Switch for compatible Galaxy devices and Windows PCs running Galaxy Connect.
 
-- The app recognizes Buds On by Bluetooth name. The macOS connection attempts Bluetooth service discovery and tries the existing Galaxy Buds management UUID. The report distinguishes a refreshed service list from a potentially cached one.
-- The Home page shows the earbuds' lower battery percentage and the case percentage from repeated Buds On status messages. Missing fields are omitted. Before those messages arrive, the app can show the overall percentage supplied by macOS. Separate left and right readings remain in the diagnostics while they are independently verified.
-- The preview checks incoming frames for valid Samsung SPP framing and CRC. The report records message IDs, lengths, counts, and battery observations without saving raw packets. Generic settings commands, factory reset, firmware, and multipoint writes are blocked for Buds On. Only the dedicated touch and preset EQ tests can send configuration commands for this model.
-- The **Touchpad** page shows read-only **Double tap during call** and **Touch and hold during call** rows after a fresh Buds On status message. The phone calls them **Answer call or end call** and **Decline call**. The first row was confirmed on Apple Silicon with SM-U600. The second decoder was checked against Samsung’s app and synthetic status frames. A Mac test turned off **Answer call or end call** on an SM-U600, confirmed in the Galaxy's Buds settings. The original On value was restored on the phone and reported after reconnecting. The Decline call write still needs a hardware check.
-- **Equalizer** displays the on-device preset from Buds On status and allows one explicitly confirmed test of a different standard preset. Custom EQ is read-only. The preset write matches the Samsung app protocol and requires a hardware check.
-- The combined **Decline call and Media controls** test preserves Answer/end call and the other untouched gesture bits. It requires a hardware check. Per-side touch-and-hold assignments are read-only in the report.
-- Samsung supports Auto Switch on compatible Galaxy devices and on Windows through Galaxy Connect. The existing [GalaxyBudsClient multipoint patch](https://github.com/timschneeb/GalaxyBudsClient/pull/729) has no verified Buds On compatibility.
+SM-U600 disables the generic multipoint capability in Samsung’s app profile. The [upstream MDE patch](https://github.com/timschneeb/GalaxyBudsClient/pull/729) is disabled for this model. Factory reset, firmware operations, and generic configuration writes are also disabled.
 
-## Protocol findings
+## Protocol evidence
 
-Static analysis used the public Galaxy Buds APK version `9.0.10.1724`, the version reported by the test Galaxy. The APK checksum matched the published value. [Public APK metadata and checksum](https://www.apkmirror.com/apk/samsung-electronics-co-ltd/galaxy-buds/galaxy-buds-9-0-10-1724-release/galaxy-buds-9-0-10-1724-android-apk-download/#safeDownload)
+Analysis used Samsung’s [Galaxy Buds 9.0.10.1724 APK](https://www.apkmirror.com/apk/samsung-electronics-co-ltd/galaxy-buds/galaxy-buds-9-0-10-1724-release/galaxy-buds-9-0-10-1724-android-apk-download/#safeDownload) and the pinned GalaxyBudsClient source. Offsets below refer to the payload and start at zero.
 
-- The SM-U600 handler reads Answer or end call from bit 4 and Decline call from bit 5 of byte 10 in the `0x61` status payload. These offsets are zero-based.
-- Samsung changes either setting with a `0x90` request that replaces the touch control state. The first eight payload bytes are one byte per flag, sourced from status bits `7, 3, 2, 1, 0, 4, 5, 6`. The last two bytes are both `1`. The test sources all eight flags from a fresh status message. Samsung's Media controls switch changes bits 3, 2, 1, and 6 together. The combined test clears those four bits and Decline bit 5 in a single frame. The individual selectors still change one bit each. Offline tests verified the frame and guard behavior. Hardware verification covers the Mac Answer or end call Off action and phone restoration.
-- Samsung sets one of six standard EQ presets with `0x86` and one byte of preset data. The current preset is byte 9 of `0x61`. An incoming `0x42` with `0x86` and the returned preset is reported separately from full status.
-- Samsung uses the high and low nibbles of status byte 11 for left and right hold enablement. The app obtains hold action labels from its own preferences.
-- In the SM-U600 capability profile, Samsung removes the Bluetooth multipoint support flag and retains the separate Galaxy Auto Switch capability. The preview keeps the multipoint patch disabled while hardware support remains unverified.
-
-## Important limits
-
-A successful CI build does not prove that the package installs, recognizes Buds On, communicates over Bluetooth, or enables multipoint. The macOS package is unsigned and may need manual approval. Builds are hosted on GitHub-hosted macOS runners; access and quotas depend on GitHub's current policies.
-
-If the run fails, open the failed step in the GitHub Actions log and inspect the error.
+- Validated `0x61` frames are 63 bytes. The EQ preset is byte 9. Byte 10 includes Answer/end call in bit 4, Decline in bit 5, and Media controls in bits 3, 2, 1, and 6. The `0x90` command preserves unrelated flags.
+- Standard EQ is set with `0x86` and a preset code from 0 to 5. The `0x69` read request accepts a validated six- or seven-row, nine-band reply and displays the last row as Custom.
+- The high and low nibbles of byte 11 hold the left and right hold options. The `0x92` command uses both sides, with 0 for Off and 6 for Volume. Other options and assistant subtype writes are disabled.
+- The two experimental audio options use `0x85` for Gaming mode (status byte 8) and `0x6C` for Pause when one earbud is removed (status byte 46). Both are binary.
+- Native and managed fixtures verify command bytes, checksums, allowed values, preservation of sibling controls, fresh status, and selected-device guards. The new hold controls, audio options, curve reading, and reconnect behavior still need physical testing on this build.
