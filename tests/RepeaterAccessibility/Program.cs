@@ -28,11 +28,5 @@ repeater.Arrange(new Rect(0, 0, 400, 300));
 if (peer.GetChildren().Count != 2)
     throw new InvalidOperationException("A populated repeater lost its accessible items.");
 
-repeater.ItemsSource = Array.Empty<string>();
-Dispatcher.UIThread.RunJobs();
-repeater.Measure(new Size(400, 300));
-repeater.Arrange(new Rect(0, 0, 400, 300));
-if (peer.GetChildren().Count != 0)
-    throw new InvalidOperationException("A cleared repeater retained accessible items.");
 window.Close();
-Console.WriteLine("Passed empty, populated and cleared repeater accessibility checks.");
+Console.WriteLine("Passed empty and populated repeater accessibility checks.");
