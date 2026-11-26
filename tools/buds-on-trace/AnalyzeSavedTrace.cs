@@ -102,17 +102,17 @@ public static class AnalyzeSavedTrace
                 Console.WriteLine("Drag the original report, ETL, or their folder onto Read-Buds-Settings.cmd.");
                 return 1;
             }
-            string output = Path.Combine(capture.Folder, "Buds-On-settings-" + Guid.NewGuid().ToString("N").Substring(0,8) + ".txt");
+            string output = Path.Combine(capture.Folder, "Buds-On-version-check-" + Guid.NewGuid().ToString("N").Substring(0,8) + ".txt");
             Console.WriteLine("Reading the saved Galaxy Book trace. This can take a minute.");
             using (StreamWriter writer = new StreamWriter(new FileStream(output, FileMode.CreateNew, FileAccess.Write, FileShare.None)))
             {
-                writer.WriteLine("Galaxy Buds On | Galaxy Book control traffic");
-                writer.WriteLine("Times are seconds from the original report start. Only the Book's Bluetooth link was captured.");
-                writer.WriteLine("Coverage is limited to captured classic Samsung serial traffic. An absent match cannot rule out another command or a separate low-energy link.");
+                writer.WriteLine("Galaxy Buds On | Galaxy Book version and audio check");
+                writer.WriteLine("Times are seconds from the original report start. Only the Book's Bluetooth link was captured. The Fold's simultaneous audio connection cannot be determined from this file.");
+                writer.WriteLine("The report checks captured classic Bluetooth audio connections and Samsung serial traffic. Other commands and low-energy connections can fall outside its coverage.");
                 try { SavedBudsReader.Scan(capture.Etl, capture.Origin, writer); }
                 catch (Exception) { writer.WriteLine("Reading stopped. Any displayed matches form a partial timeline."); }
             }
-            Console.WriteLine("Share the selected Buds-On-settings text file in chat. Keep the original ETL local.");
+            Console.WriteLine("Share the selected Buds-On-version-check text file in chat. Keep the original ETL local.");
             try { Process.Start("explorer.exe", "/select,\"" + output + "\""); }
             catch (System.ComponentModel.Win32Exception) { Console.WriteLine("The summary is in the same folder as the original report."); }
             return 0;

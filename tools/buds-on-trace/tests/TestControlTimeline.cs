@@ -41,8 +41,120 @@ public static class TestControlTimeline
         return s.Split(new[] { word }, StringSplitOptions.None).Length-1;
     }
 
+    private static byte[] Hex(string words)
+    {
+        return words.Split(' ').Select(word => Convert.ToByte(word, 16)).ToArray();
+    }
+
+    private static byte[] Control(byte address, byte control)
+    {
+        byte[] data = { address, control, 1, 0 };
+        int fcs = 255;
+        for (int i = 0; i < 3; i++)
+        {
+            fcs ^= data[i];
+            for (int bit = 0; bit < 8; bit++) fcs = (fcs >> 1) ^ ((fcs & 1) != 0 ? 224 : 0);
+        }
+        data[3] = (byte)(255 - fcs);
+        return data;
+    }
+
+    private static void CheckVersionTimeline(DateTimeOffset origin)
+    {
+        var output = new StringWriter();
+        var session = new BudsSession(origin, output);
+        DateTimeOffset now = origin;
+        Action<bool,int,byte[]> rfcomm = delegate(bool fromBook, int channel, byte[] data) {
+            now = now.AddMilliseconds(100);
+            session.L2cap(now, fromBook, 3, channel, data);
+        };
+        // Synthetic attribute discovery binds RFCOMM server 1 on the peer to Samsung SMEP.
+        session.L2cap(now, true, 1, 9, Hex("04 00 01 00 0e 00 00 01 22 ff ff 35 05 0a 00 00 ff ff 00"));
+        session.L2cap(now, false, 1, 9, Hex("05 00 01 00 2c 00 29 35 27 09 00 01 35 11 1c f8 62 06 74 a1 ed 41 ab a8 b9 de 9a d6 55 72 9d 09 00 04 35 0c 35 03 19 01 00 35 05 19 00 03 08 01 00"));
+        Action<int> open = delegate(int channel) {
+            rfcomm(true, channel, Control(3, 0x3f));
+            rfcomm(false, channel, Control(3, 0x73));
+        };
+        open(1);
+        open(2);
+        byte[] shortRequest = Frame(true, 1, Hex("43 04 03 04 00 00 0b 7b"));
+        byte[] extendedRequest = Frame(true, 1, Hex("43 04 03 08 00 00 0b 66 4d 41 52 4b"));
+        byte[] notification = Frame(true, 1, Hex("45 02 05 4c 0b 66 66 7b 66 66 66"));
+        Action<int,byte[]> write = (channel, bytes) => rfcomm(true, channel, Serial(bytes));
+        Action<string> notify = delegate(string expected) {
+            int before = output.GetStringBuilder().Length;
+            rfcomm(false, 1, Serial(notification));
+            string line = output.ToString().Substring(before);
+            if (!line.Contains(expected)) throw new Exception("Expected " + expected + ", got " + line);
+        };
+        const string equal = "captured version fields are equal";
+        const string different = "captured version fields differ";
+        const string unknown = "version-field comparison inconclusive";
+        write(1, shortRequest);
+        notify(equal);
+        notify(unknown); // a second notification cannot reuse the request
+        write(1, extendedRequest);
+        notify(different); // unrelated notification bytes match the request value
+        write(2, shortRequest);
+        notify(unknown);
+        write(1, shortRequest);
+        write(1, shortRequest);
+        notify(unknown);
+        now = now.AddSeconds(6);
+        write(1, shortRequest);
+        write(1, Frame(true, 1, 0x43)); // intervening ambiguous outbound frame
+        notify(unknown);
+        now = now.AddSeconds(6);
+        write(1, shortRequest);
+        now = now.AddSeconds(6);
+        notify(unknown);
+        write(1, shortRequest);
+        open(1); // a fresh RFCOMM handshake
+        notify(unknown);
+        write(1, shortRequest);
+        rfcomm(false, 1, Control(11, 0x53)); // disconnect the individual DLCI
+        notify(unknown);
+        write(1, shortRequest);
+        byte[] corrupt = (byte[])shortRequest.Clone();
+        corrupt[corrupt.Length - 2] ^= 1;
+        write(1, corrupt);
+        notify(unknown);
+        now = now.AddSeconds(6);
+        write(1, shortRequest);
+        session.Close(1); // dropped L2CAP channel or transport gap
+        open(1);
+        notify(unknown);
+        // A partially observed inbound frame began before the write.
+        rfcomm(false, 1, Serial(notification.Take(4).ToArray()));
+        write(1, shortRequest);
+        rfcomm(false, 1, Serial(notification.Skip(4).ToArray()));
+        now = now.AddSeconds(6);
+        write(1, shortRequest);
+        now = now.AddSeconds(-2);
+        notify(unknown);
+        string details = output.ToString();
+        if (Occurrences(details, equal) != 1 || Occurrences(details, different) != 1 ||
+            Occurrences(details, unknown) != 11 || !details.Contains("extended layout") ||
+            !details.Contains("version-only layout") || details.Contains("MARK"))
+            throw new Exception("Confirmed version shape, comparison, or redaction check failed.");
+
+        output = new StringWriter();
+        var parser = new ObservedSettings(origin, output);
+        byte[] plain = Hex("43 04 03 04 00 00 0b 7b");
+        byte[] report = Hex("45 02 05 4c 0b 00 00 7b 00 00 00");
+        parser.Frame(origin, true, 4, 2, true, 1, false, plain, "unconfirmed");
+        parser.Frame(origin, false, 4, 2, true, 1, false, report, "unconfirmed");
+        if (output.ToString().Contains("comparison") || output.ToString().Contains("layout"))
+            throw new Exception("Unattributed traffic produced version details.");
+        parser.Frame(origin, true, 4, 2, true, 1, false, plain, "Samsung SMEP");
+        parser.Frame(origin, false, 4, 4, true, 1, false, report, "Samsung SMEP");
+        if (!output.ToString().Contains(unknown) || output.ToString().Contains(equal))
+            throw new Exception("Comparison crossed a DLCI boundary.");
+    }
+
     public static int Main()
     {
+        AudioEvidenceTest.Run();
         var output = new StringWriter();
         var t = new TraceTransport(0x112233445566UL, new DateTimeOffset(2000,1,1,0,0,0,TimeSpan.Zero), output);
         DateTimeOffset time = new DateTimeOffset(2000,1,1,0,0,0,TimeSpan.Zero);
@@ -89,6 +201,7 @@ public static class TestControlTimeline
         if (Occurrences(details,"Book sent a property matching")!=1 || !details.Contains("MDE notifications = 1")
             || !details.Contains("requested state off") || details.Contains("MARK"))
             throw new Exception("Version negotiation and status-only fixture check failed.");
+        CheckVersionTimeline(time);
         Console.WriteLine("Offline controller, RFCOMM, setting, and redaction checks passed.");
         return 0;
     }

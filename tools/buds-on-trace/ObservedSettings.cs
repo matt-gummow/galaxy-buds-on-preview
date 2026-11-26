@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 
@@ -11,6 +12,17 @@ public sealed class ObservedSettings
     private int direct, version, status, versionReports, otherPropertyWrites, related, acknowledgements, omitted;
     private readonly int[] shown = new int[8];
     private const int MaxEvidenceLines = 48;
+    private static readonly TimeSpan ComparisonWindow = TimeSpan.FromSeconds(5);
+
+    private sealed class VersionWrite
+    {
+        public DateTimeOffset Time;
+        // Null while multiple or interrupted observations make a comparison ambiguous.
+        public byte? Version;
+    }
+
+    private readonly Dictionary<Tuple<int, int>, VersionWrite> writes =
+        new Dictionary<Tuple<int, int>, VersionWrite>();
 
     public ObservedSettings(DateTimeOffset origin, TextWriter output)
     {
@@ -27,15 +39,68 @@ public sealed class ObservedSettings
             (time-origin).TotalSeconds.ToString("F3", CultureInfo.InvariantCulture), evidence, binding);
     }
 
-    public void Frame(DateTimeOffset time, bool fromBook, int channelId, int dlci,
-        bool alternative, int messageId, bool response, byte[] payload, string service)
+    public void Reset(int channelId, int dlci)
     {
+        if (dlci != 0) { writes.Remove(Tuple.Create(channelId, dlci)); return; }
+        foreach (var key in new List<Tuple<int, int>>(writes.Keys))
+            if (key.Item1 == channelId) writes.Remove(key);
+    }
+
+    public void Interrupt(DateTimeOffset time, int channelId, int dlci)
+    {
+        if (writes.Count == 0) return;
+        var key = Tuple.Create(channelId, dlci);
+        VersionWrite write;
+        if (writes.TryGetValue(key, out write))
+        {
+            if (time - write.Time > ComparisonWindow) { writes.Remove(key); return; }
+            write.Version = null;
+            if (time > write.Time) write.Time = time;
+        }
+    }
+
+    private void Remember(DateTimeOffset time, int channelId, int dlci, byte versionField, bool overlap)
+    {
+        var key = Tuple.Create(channelId, dlci);
+        VersionWrite previous;
+        if (writes.TryGetValue(key, out previous) && time - previous.Time <= ComparisonWindow)
+            Interrupt(time, channelId, dlci);
+        else
+            writes[key] = new VersionWrite { Time = time, Version = overlap ? (byte?)null : versionField };
+    }
+
+    private string Compare(DateTimeOffset time, int channelId, int dlci, byte versionField)
+    {
+        var key = Tuple.Create(channelId, dlci);
+        VersionWrite write;
+        if (writes.TryGetValue(key, out write))
+        {
+            TimeSpan elapsed = time - write.Time;
+            if (elapsed < TimeSpan.Zero) Interrupt(time, channelId, dlci);
+            else if (elapsed > ComparisonWindow) writes.Remove(key);
+            else if (write.Version.HasValue)
+            {
+                writes.Remove(key);
+                return write.Version.Value == versionField ? ", captured version fields are equal"
+                                                         : ", captured version fields differ";
+            }
+        }
+        return ", version-field comparison inconclusive";
+    }
+
+    public void Frame(DateTimeOffset time, bool fromBook, int channelId, int dlci,
+        bool alternative, int messageId, bool response, byte[] payload, string service, bool overlap = false)
+    {
+        bool confirmed = service == "Samsung SMEP";
+        if (!confirmed || overlap) Interrupt(time, channelId, dlci);
+        bool propertyWrite = alternative && messageId == 1 && payload != null && payload.Length >= 1 &&
+                             payload[0] == 0x43;
+        if (fromBook && !propertyWrite) Interrupt(time, channelId, dlci);
         if (payload == null) return;
         if (alternative)
         {
             if (service == "Samsung SPP" || messageId != 1 || payload.Length < 1) return;
-            // Recognize the property envelope and its declared extent. Do not
-            // retain or report host version values, account fields or trailing data.
+            // Only the version byte is used for comparison. Trailing fields stay opaque.
             if (fromBook && payload[0] == 0x43)
             {
                 if (payload.Length >= 8 && payload[1] == 4 && payload[2] == 3 &&
@@ -43,15 +108,26 @@ public sealed class ObservedSettings
                     payload[6] == 0x0b)
                 {
                     version++;
-                    Record(0, time, "Book sent a property matching the upstream MDE host-version format", service);
+                    string detail = "";
+                    if (confirmed)
+                    {
+                        detail = payload[3] == 4 ? ", version-only layout" : ", extended layout";
+                        Remember(time, channelId, dlci, payload[7], overlap);
+                    }
+                    Record(0, time, "Book sent a property matching the upstream MDE host-version format" + detail, service);
                 }
-                else otherPropertyWrites++;
+                else
+                {
+                    otherPropertyWrites++;
+                    Interrupt(time, channelId, dlci);
+                }
             }
             else if (!fromBook && payload.Length >= 11 && payload[0] == 0x45 && payload[1] == 2 &&
                      payload[2] == 5 && payload[3] == 0x4c && payload[4] == 0x0b)
             {
                 versionReports++;
-                Record(1, time, "Buds sent a notification matching the upstream MDE host-version format", service);
+                string detail = confirmed ? Compare(time, channelId, dlci, payload[7]) : "";
+                Record(1, time, "Buds sent a notification matching the upstream MDE host-version format" + detail, service);
             }
             return;
         }
@@ -96,5 +172,8 @@ public sealed class ObservedSettings
         if (direct != 0) output.WriteLine("On other models the same message ID also names a debug setting. A shape match does not establish its meaning on Buds On.");
         if (omitted != 0)
             output.WriteLine("Additional repeated observations omitted from timeline = " + omitted + ".");
+        if (versionReports != 0 && version != 0)
+            output.WriteLine("Version-field comparisons use a preceding write on the same confirmed SMEP channel within five seconds. A notification alone cannot establish command acceptance or a simultaneous phone link.");
+        writes.Clear();
     }
 }

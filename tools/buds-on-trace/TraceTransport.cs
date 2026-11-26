@@ -45,6 +45,8 @@ public sealed class TraceTransport
     private readonly bool[] discardTail = new bool[2];
     private int nextChannel, rx, tx, gaps, rfcomm, sdp, other, unmapped;
 
+    private int avdtpChannels, synchronousLinks;
+
     public TraceTransport(ulong address, DateTimeOffset origin, TextWriter output)
     {
         if (address == 0 || address > 0xffffffffffffUL) throw new ArgumentOutOfRangeException("address");
@@ -70,6 +72,10 @@ public sealed class TraceTransport
         session.Finish();
         output.WriteLine("Link coverage: inbound ACL records {0}, outbound {1}; complete RFCOMM SDUs {2}, SDP SDUs {3}; other mapped SDUs {4}, unmapped dynamic SDUs {5}, observable gaps {6}.",
             rx, tx, rfcomm, sdp, other, unmapped, gaps);
+        output.WriteLine("Book classic audio evidence: AVDTP channel openings {0}, SCO/eSCO connection completions {1}.",
+            avdtpChannels, synchronousLinks);
+        if (avdtpChannels == 0 && synchronousLinks == 0)
+            output.WriteLine("No classic audio transport establishment observed in this interval (LE Audio outside scope).");
         routes.Clear();
         requests.Clear();
         fragments[0] = fragments[1] = null;
@@ -82,6 +88,7 @@ public sealed class TraceTransport
     {
         End();
         rx = tx = gaps = rfcomm = sdp = other = unmapped = nextChannel = 0;
+        avdtpChannels = synchronousLinks = 0;
         epochs++;
         handle = h;
         session = new BudsSession(origin, output);
@@ -99,14 +106,21 @@ public sealed class TraceTransport
     private void ControllerEvent(DateTimeOffset time, byte[] b)
     {
         if (b == null || b.Length < 2 || b[1] != b.Length - 2) { LostEvent(time); return; }
-        if (b[0] == 3 && b.Length == 13 && b[2] == 0)
+        bool classicComplete = b[0] == 3 && b.Length == 13;
+        bool synchronousComplete = b[0] == 0x2c && b.Length == 19;
+        if ((classicComplete || synchronousComplete) && b[2] == 0)
         {
             int h = U16(b, 3);
             if (h >= 0xf00) return;
             ulong peer = 0;
             for (int i = 0; i < 6; i++) peer |= (ulong)b[5+i] << (8*i);
-            if (b[11] == 1 && peer == address) Start(time, h);
+            if (classicComplete && b[11] == 1 && peer == address) Start(time, h);
             else if (h == handle) LostEvent(time);
+            else if (handle >= 0 && peer == address && (b[11] == 0 || (synchronousComplete && b[11] == 2)))
+            {
+                synchronousLinks++;
+                Mark(time, "Book and Buds established a synchronous audio transport (SCO/eSCO).");
+            }
             return;
         }
         if (handle < 0) return;
@@ -117,8 +131,6 @@ public sealed class TraceTransport
         }
         else if ((b[0] == 0x10 && b.Length == 3) ||
                  (b[0] == 0x0e && b.Length == 6 && U16(b, 3) == 0x0c03 && b[5] == 0))
-            LostEvent(time);
-        else if (b[0] == 0x2c && b.Length == 19 && b[2] == 0 && U16(b, 3) == handle)
             LostEvent(time);
         else if (b[0] == 0x3e && b.Length >= 6 && b[3] == 0 && U16(b, 4) == handle &&
                  (b[2] == 1 || b[2] == 10 || b[2] == 0x29 || b[2] == 0x19 || b[2] == 0x2a))
@@ -157,7 +169,7 @@ public sealed class TraceTransport
         if (routes.TryGetValue(Key(ownerBook, cid), out channel)) Remove(channel);
     }
 
-    private void Signal(bool fromBook, byte[] b)
+    private void Signal(DateTimeOffset time, bool fromBook, byte[] b)
     {
         for (int i = 0; i < b.Length;)
         {
@@ -197,6 +209,11 @@ public sealed class TraceTransport
                             Book = fromBook ? dst : src, Peer = fromBook ? src : dst };
                         routes.Add(Key(true,channel.Book), channel);
                         routes.Add(Key(false,channel.Peer), channel);
+                        if (channel.Psm == 0x19)
+                        {
+                            avdtpChannels++;
+                            Mark(time, "Book and Buds opened an AVDTP channel.");
+                        }
                     }
                 }
             }
@@ -290,7 +307,7 @@ public sealed class TraceTransport
         f.Received += raw.Length-pos;
         if (f.Received != length) return;
         fragments[dir] = null;
-        if (f.IsSignal) Signal(fromBook,f.Body);
+        if (f.IsSignal) Signal(time,fromBook,f.Body);
         else if (f.Route != null && f.Body != null && f.Route.Basic)
         {
             if (f.Route.Psm == 3) rfcomm++; else sdp++;
@@ -313,5 +330,7 @@ public sealed class TraceTransport
     {
         End();
         output.WriteLine("Attributable classic connection intervals: " + epochs + ".");
+        if (epochs == 0) output.WriteLine("No attributable Book classic audio interval (LE Audio outside scope).");
+        output.WriteLine("Classic transport establishment alone does not establish media playback, a call, or a simultaneous phone link.");
     }
 }

@@ -22,10 +22,10 @@ Copy-Item -LiteralPath (Join-Path $root 'Read-Buds-Settings.cmd') -Destination $
 $refs = 'System.dll', 'System.Core.dll', 'System.Xml.dll'
 # Compile exactly what Windows PowerShell runs when the user double-clicks.
 Add-Type -Path $merged -ReferencedAssemblies $refs
-$test = Get-Item -LiteralPath (Join-Path $PSScriptRoot 'TestControlTimeline.cs')
+$testSources = @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter *.cs | ForEach-Object { $_.FullName })
 $exe = Join-Path $env:RUNNER_TEMP 'TestControlTimeline.exe'
 $csc = Join-Path ([Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()) 'csc.exe'
-& $csc /nologo /target:exe "/out:$exe" $merged $test.FullName
+& $csc /nologo /target:exe "/out:$exe" $merged @testSources
 if ($LASTEXITCODE -ne 0) { throw 'Could not compile offline controller test.' }
 & $exe
 if ($LASTEXITCODE -ne 0) { throw 'Offline control timeline test failed.' }
