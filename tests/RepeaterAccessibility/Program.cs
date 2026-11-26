@@ -12,7 +12,7 @@ AppBuilder.Configure<Application>()
 
 var repeater = new FAItemsRepeater
 {
-    Layout = new FAStackLayout(),
+    Layout = new FAStackLayout { DisableVirtualization = true },
     ItemTemplate = new FuncDataTemplate<string>((value, _) => new Button { Content = value, Width = 120, Height = 36 })
 };
 var peer = ControlAutomationPeer.CreatePeerForElement(repeater);
