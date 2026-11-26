@@ -10,32 +10,80 @@ internal static class Program
 {
     public static int Main(string[] args)
     {
+        if (args is ["--self-test"]) return SelfTest.Run();
+        if (args.Length != 1 || !string.Equals(Path.GetFileName(args[0]), "EasyConnectLib.dll", StringComparison.OrdinalIgnoreCase))
+            return 2;
+
+        byte[] image;
         try
         {
-            if (args is ["--self-test"]) return SelfTest.Run();
-            if (args.Length != 1 || !Path.GetFileName(args[0]).Equals("EasyConnectLib.dll", StringComparison.OrdinalIgnoreCase))
-            {
-                Console.Error.WriteLine("Expected a path to EasyConnectLib.dll.");
-                return 2;
-            }
-
+            // Match the byte access used by the earlier reader. One open handle supplies
+            // the complete snapshot, even if Windows renames the package while reading.
             using var input = new FileStream(args[0], FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
-            using var scanner = new CallsiteReader(input);
-            scanner.Write(Console.Out);
-            return 0;
+            long length = input.Length;
+            if (length < 1 || length > 64 * 1024 * 1024) return 13;
+            image = new byte[(int)length];
+            input.ReadExactly(image);
+            if (input.Length != length) return 12;
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or BadImageFormatException
-            or InvalidDataException or ArgumentException or InvalidOperationException or OverflowException)
+        catch (Exception e) when (e is UnauthorizedAccessException or System.Security.SecurityException) { return 10; }
+        catch (IOException e) when (OperatingSystem.IsWindows() && (e.HResult & 0xffff) is 32 or 33) { return 11; }
+        catch (IOException) { return 12; }
+
+        using var snapshot = new MemoryStream(image, writable: false);
+        return Inspect(snapshot, Console.Out);
+    }
+
+    internal static bool InvalidMetadata(Exception e) =>
+        e is BadImageFormatException or InvalidDataException or ArgumentException or InvalidOperationException
+            or OverflowException or IndexOutOfRangeException or NotSupportedException;
+
+    internal static int Inspect(Stream snapshot, TextWriter output)
+    {
+        using var pe = new PEReader(snapshot, PEStreamOptions.LeaveOpen);
+        MetadataReader metadata;
+        try
         {
-            Console.Error.WriteLine($"Managed inspection incomplete ({e.GetType().Name}).");
-            return 1;
+            // Read raw metadata, without applying WinRT type projections.
+            if (!pe.HasMetadata) return 20;
+            metadata = pe.GetMetadataReader(MetadataReaderOptions.None);
         }
+        catch (Exception e) when (InvalidMetadata(e)) { return 20; }
+
+        using var body = new StringWriter();
+        string? inventoryReason;
+        if (metadata.MethodDefinitions.Count > CallsiteReader.MaxMethods)
+            inventoryReason = "The method table exceeds the call-graph limit.";
+        else
+        {
+            try
+            {
+                var scanner = new CallsiteReader(pe, metadata);
+                inventoryReason = scanner.InventoryReason();
+                if (inventoryReason == null) scanner.Write(body);
+            }
+            catch (Exception e) when (InvalidMetadata(e))
+            {
+                inventoryReason = "Managed metadata was located but the call graph could not be decoded.";
+            }
+        }
+
+        if (inventoryReason == null) output.Write(body);
+        else
+        {
+            output.WriteLine("Managed method inventory only.");
+            output.WriteLine(inventoryReason);
+        }
+        CallsiteReader.WriteInventory(metadata, output);
+        output.WriteLine(inventoryReason == null ? "Scan complete." : "Inventory complete.");
+        return inventoryReason == null ? 0 : 21;
     }
 }
 
-internal sealed partial class CallsiteReader : IDisposable
+internal sealed partial class CallsiteReader
 {
-    private const int MaxMethods = 65000, MaxDepth = 5, MaxRootWalk = 2500, MaxPaths = 200;
+    public const int MaxMethods = 65000;
+    private const int MaxDepth = 5, MaxRootWalk = 2500, MaxPaths = 200;
     private readonly PEReader pe;
     private readonly MetadataReader metadata;
     private readonly Dictionary<MethodDefinitionHandle, Node> nodes = new();
@@ -49,22 +97,39 @@ internal sealed partial class CallsiteReader : IDisposable
     private sealed class Node
     {
         public string? Root;
+        public bool HasDecodedBody;
         public List<(MethodDefinitionHandle To, string Via)> Edges { get; } = new();
         public SortedSet<string> Evidence { get; } = new(StringComparer.Ordinal);
     }
     private readonly record struct Member(string Type, string Name, MethodDefinitionHandle Local);
 
-    public CallsiteReader(Stream source)
+    public CallsiteReader(PEReader pe, MetadataReader metadata)
     {
-        if (source.Length > 64 * 1024 * 1024) throw new InvalidDataException();
-        pe = new PEReader(source, PEStreamOptions.LeaveOpen);
-        metadata = pe.GetMetadataReader();
-        if (metadata.MethodDefinitions.Count > MaxMethods) throw new InvalidDataException();
+        this.pe = pe;
+        this.metadata = metadata;
         foreach (var handle in metadata.MethodDefinitions) nodes.Add(handle, new Node());
-        foreach (var (handle, node) in nodes) ReadMethod(handle, node);
+        foreach (var (handle, node) in nodes)
+        {
+            try { ReadMethod(handle, node); }
+            catch (Exception e) when (Program.InvalidMetadata(e))
+            {
+                // Discard partial edges from this method. A malformed row cannot
+                // erase already decoded edges in other methods.
+                node.Edges.Clear();
+                node.Evidence.Clear();
+                brokenBodies++;
+            }
+        }
     }
 
-    public void Dispose() => pe.Dispose();
+    public string? InventoryReason()
+    {
+        if (!nodes.Values.Any(n => n.HasDecodedBody))
+            return $"No usable managed method bodies. Native/abstract/absent = {missingBodies}; unreadable/oversized = {brokenBodies}.";
+        if (nodes.Values.Any(n => n.Root != null) && !nodes.Values.Any(n => n.HasDecodedBody && n.Root != null))
+            return "The switch candidates identified by name have no decodable method bodies.";
+        return null;
+    }
 
     private string Str(StringHandle h) => metadata.GetString(h);
     private static string Token(MethodDefinitionHandle h) => $"#{MetadataTokens.GetToken(h):X8}";
@@ -86,6 +151,38 @@ internal sealed partial class CallsiteReader : IDisposable
         var method = metadata.GetMethodDefinition(handle);
         var declaring = metadata.GetTypeDefinition(method.GetDeclaringType());
         return $"{PublicName(Str(declaring.Name))}.{PublicName(Str(method.Name))} {Token(handle)}";
+    }
+
+    // This pass reads declarations directly and also works when there is no usable IL.
+    public static void WriteInventory(MetadataReader metadata, TextWriter output)
+    {
+        const int rowLimit = 100000, displayLimit = 120;
+        int examined = 0, matches = 0, unreadable = 0;
+        output.WriteLine("Declared names in metadata (no call or runtime behavior implied):");
+        foreach (var h in metadata.MethodDefinitions)
+        {
+            if (examined == rowLimit) break;
+            examined++;
+            try
+            {
+                var method = metadata.GetMethodDefinition(h);
+                var type = metadata.GetString(metadata.GetTypeDefinition(method.GetDeclaringType()).Name);
+                var name = metadata.GetString(method.Name);
+                string? label = null;
+                if (SwitchName(name) || (SwitchName(type) && !type.StartsWith('<') && !name.StartsWith('.')))
+                    label = $"switch-related declaration / {PublicName(type)}.{PublicName(name)}";
+                if (method.Attributes.HasFlag(MethodAttributes.PinvokeImpl))
+                {
+                    var import = method.GetImport();
+                    var module = metadata.GetString(metadata.GetModuleReference(import.Module).Name);
+                    if (module.Equals("DllBudsMsgFmt", IgnoreCase) || module.Equals("DllBudsMsgFmt.dll", IgnoreCase))
+                        label = "formatter import declaration / " + PublicName(metadata.GetString(import.Name));
+                }
+                if (label != null && ++matches <= displayLimit) output.WriteLine($"{label} {Token(h)}");
+            }
+            catch (Exception e) when (Program.InvalidMetadata(e)) { unreadable++; }
+        }
+        output.WriteLine($"Inventory rows checked = {examined} of {metadata.MethodDefinitions.Count}; matching declarations = {matches}; omitted matches = {Math.Max(0, matches - displayLimit)}; unreadable rows = {unreadable}.");
     }
 
     // Return the declaring generic type, if the parent is a constructed generic type.
@@ -220,69 +317,62 @@ internal sealed partial class CallsiteReader : IDisposable
         if (method.RelativeVirtualAddress == 0) { missingBodies++; return; }
         if ((method.ImplAttributes & MethodImplAttributes.CodeTypeMask) != MethodImplAttributes.IL)
         { missingBodies++; return; }
-        try
+        LinkAsync(h, node);
+        var il = pe.GetMethodBody(method.RelativeVirtualAddress).GetILBytes();
+        if (il == null || il.Length == 0 || il.Length > 256 * 1024) { brokenBodies++; return; }
+        int pos = 0;
+        while (pos < il.Length)
         {
-            LinkAsync(h, node);
-            var il = pe.GetMethodBody(method.RelativeVirtualAddress).GetILBytes();
-            if (il == null || il.Length > 256 * 1024) { brokenBodies++; return; }
-            int pos = 0;
-            while (pos < il.Length)
+            ushort code = il[pos++];
+            if (code == 0xfe) { Ensure(il, pos, 1); code = (ushort)(0xfe00 | il[pos++]); }
+            if (!Opcodes.TryGetValue(code, out var op)) throw new BadImageFormatException();
+            int size = OperandSize(il, pos, op.OperandType);
+            Ensure(il, pos, size);
+            if (op == OpCodes.Ldstr)
             {
-                ushort code = il[pos++];
-                if (code == 0xfe) { Ensure(il, pos, 1); code = (ushort)(0xfe00 | il[pos++]); }
-                if (!Opcodes.TryGetValue(code, out var op)) throw new BadImageFormatException();
-                int size = OperandSize(il, pos, op.OperandType);
-                Ensure(il, pos, size);
-                if (op == OpCodes.Ldstr)
+                var token = BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(pos));
+                if ((token >> 24) != 0x70) throw new BadImageFormatException();
+                string literal = metadata.GetUserString(MetadataTokens.UserStringHandle(token & 0xffffff));
+                if (literal.Equals("SM-U600", IgnoreCase) || literal.Equals("Galaxy Buds On", IgnoreCase))
+                    node.Evidence.Add("ldstr / exact " + (literal.Equals("SM-U600", IgnoreCase) ? "SM-U600" : "Galaxy Buds On") + " literal");
+                if (literal.Equals("MDE_VERSION", IgnoreCase)) node.Evidence.Add("ldstr / exact MDE_VERSION literal");
+                if (ordinary && node.Root == null && (literal.Equals("BudsAutoSwitch", IgnoreCase) || literal.Equals("AutoSwitchBuds", IgnoreCase)))
+                    node.Root = "loads exact switch name";
+            }
+            if (op == OpCodes.Ldftn || op == OpCodes.Ldvirtftn)
+            {
+                var token = BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(pos));
+                var target = Describe(MetadataTokens.EntityHandle(token), localLink: true);
+                if (!target.Local.IsNil) node.Edges.Add((target.Local, "delegate target reference"));
+            }
+            if (op == OpCodes.Call || op == OpCodes.Callvirt || op == OpCodes.Newobj || op == OpCodes.Jmp)
+            {
+                var token = BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(pos));
+                var member = Describe(MetadataTokens.EntityHandle(token), localLink: true);
+                if (PlatformEndpoint(member) is { } end) node.Evidence.Add($"{op.Name} / {end}");
+                if (!member.Local.IsNil)
                 {
-                    var token = BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(pos));
-                    if ((token >> 24) != 0x70) throw new BadImageFormatException();
-                    string literal = metadata.GetUserString(MetadataTokens.UserStringHandle(token & 0xffffff));
-                    if (literal.Equals("SM-U600", IgnoreCase) || literal.Equals("Galaxy Buds On", IgnoreCase))
-                        node.Evidence.Add("ldstr / exact " + (literal.Equals("SM-U600", IgnoreCase) ? "SM-U600" : "Galaxy Buds On") + " literal");
-                    if (literal.Equals("MDE_VERSION", IgnoreCase)) node.Evidence.Add("ldstr / exact MDE_VERSION literal");
-                    if (ordinary && node.Root == null && (literal.Equals("BudsAutoSwitch", IgnoreCase) || literal.Equals("AutoSwitchBuds", IgnoreCase)))
-                        node.Root = "loads exact switch name";
-                }
-                if (op == OpCodes.Ldftn || op == OpCodes.Ldvirtftn)
-                {
-                    var token = BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(pos));
-                    var target = Describe(MetadataTokens.EntityHandle(token), localLink: true);
-                    if (!target.Local.IsNil) node.Edges.Add((target.Local, "delegate target reference"));
-                }
-                if (op == OpCodes.Call || op == OpCodes.Callvirt || op == OpCodes.Newobj || op == OpCodes.Jmp)
-                {
-                    var token = BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(pos));
-                    var member = Describe(MetadataTokens.EntityHandle(token), localLink: true);
-                    if (PlatformEndpoint(member) is { } end) node.Evidence.Add($"{op.Name} / {end}");
-                    if (!member.Local.IsNil)
+                    node.Edges.Add((member.Local, op.Name!));
+                    var target = metadata.GetMethodDefinition(member.Local);
+                    if (target.Attributes.HasFlag(MethodAttributes.PinvokeImpl))
                     {
-                        node.Edges.Add((member.Local, op.Name!));
-                        var target = metadata.GetMethodDefinition(member.Local);
-                        if (target.Attributes.HasFlag(MethodAttributes.PinvokeImpl))
-                        {
-                            var import = target.GetImport();
-                            var module = Str(metadata.GetModuleReference(import.Module).Name);
-                            if (module.Equals("DllBudsMsgFmt", IgnoreCase) || module.Equals("DllBudsMsgFmt.dll", IgnoreCase))
-                                node.Evidence.Add($"{op.Name} / Buds formatter native import / {PublicName(Str(import.Name))}");
-                        }
+                        var import = target.GetImport();
+                        var module = Str(metadata.GetModuleReference(import.Module).Name);
+                        if (module.Equals("DllBudsMsgFmt", IgnoreCase) || module.Equals("DllBudsMsgFmt.dll", IgnoreCase))
+                            node.Evidence.Add($"{op.Name} / Buds formatter native import / {PublicName(Str(import.Name))}");
                     }
                 }
-                if (op.OperandType == OperandType.InlineField)
-                {
-                    var member = Describe(MetadataTokens.EntityHandle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(pos))));
-                    if (string.Equals(member.Name, "MDE_VERSION", IgnoreCase)) node.Evidence.Add($"{op.Name} / MDE_VERSION field");
-                    if (ordinary && node.Root == null && (string.Equals(member.Name, "BudsAutoSwitch", IgnoreCase) ||
-                        string.Equals(member.Name, "AutoSwitchBuds", IgnoreCase))) node.Root = "references a switch-named field";
-                }
-                pos += size;
             }
+            if (op.OperandType == OperandType.InlineField)
+            {
+                var member = Describe(MetadataTokens.EntityHandle(BinaryPrimitives.ReadInt32LittleEndian(il.AsSpan(pos))));
+                if (string.Equals(member.Name, "MDE_VERSION", IgnoreCase)) node.Evidence.Add($"{op.Name} / MDE_VERSION field");
+                if (ordinary && node.Root == null && (string.Equals(member.Name, "BudsAutoSwitch", IgnoreCase) ||
+                    string.Equals(member.Name, "AutoSwitchBuds", IgnoreCase))) node.Root = "references a switch-named field";
+            }
+            pos += size;
         }
-        catch (Exception ex) when (ex is BadImageFormatException or ArgumentException or OverflowException or InvalidOperationException)
-        {
-            // Do not report paths inferred from a partially decoded method.
-            node.Edges.Clear(); node.Evidence.Clear(); brokenBodies++;
-        }
+        node.HasDecodedBody = true;
     }
 
     private static void Ensure(byte[] il, int pos, int length)
