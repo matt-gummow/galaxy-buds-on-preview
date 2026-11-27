@@ -49,6 +49,8 @@ In the November 27 1.5 hardware run, macOS completed one write on verified RFCOM
 
 The Mac baseband probe returned disconnected at all three checkpoints, including immediately after the successful write on the open channel. Treat the Mac baseband state as inconclusive for this run. Earbud acceptance of the setup message and whether the Fold retained an active audio profile while the Mac played remain unverified.
 
+In the follow-up 1.5 hardware test, the Fold call automatically took over audio in the Buds while the Mac was playing YouTube. After hang-up, YouTube required pressing Play. Mac audio then played through the Buds without a manual Bluetooth reconnect. This run confirms automatic call handoff and return to Mac audio on demand. Media playback did not resume automatically in this test.
+
 References:
 - [Upstream MDE implementation and hardware discussion](https://github.com/timschneeb/GalaxyBudsClient/pull/729)
 - [Buds4 Pro feature profile at the pinned upstream revision](https://github.com/timschneeb/GalaxyBudsClient/blob/85dfc8bb39fc45d3c30ecf71ab2c663fb1d41729/GalaxyBudsClient/Model/Specifications/Buds4ProDeviceSpec.cs)
