@@ -43,7 +43,11 @@ The 1.3 hardware run opened the outgoing channel and timed out waiting for the f
 
 The 1.4 hardware run completed the write on verified RFCOMM channel 25 and closed its control channel. Mac audio disconnected when the Fold connected. Earbud acceptance and Mac baseband state were unconfirmed.
 
-Version 1.5 keeps the same setup write and leaves the outgoing channel open through the Fold reconnection and Mac playback check. It timestamps any reported channel closure, samples RFCOMM and the Mac baseband separately, and records whether the listener heard Mac audio without manually reconnecting. The 1.5 hardware result is pending.
+Version 1.5 keeps the same setup write and leaves the outgoing channel open through the Fold reconnection and Mac playback check. It timestamps any reported channel closure, samples RFCOMM and the Mac baseband separately, and records whether the listener heard Mac audio without manually reconnecting.
+
+In the November 27 1.5 hardware run, macOS completed one write on verified RFCOMM channel 25. The same channel reported open immediately after the write (+1.9 s), when the listener marked the Fold reconnected (+27.7 s), and before app cleanup (+85.9 s). The app logged no channel closure. The listener heard Mac audio through the Buds after the Fold reconnection without manually reconnecting the Mac.
+
+The Mac baseband probe returned disconnected at all three checkpoints, including immediately after the successful write on the open channel. Treat the Mac baseband state as inconclusive for this run. Earbud acceptance of the setup message and whether the Fold retained an active audio profile while the Mac played remain unverified.
 
 References:
 - [Upstream MDE implementation and hardware discussion](https://github.com/timschneeb/GalaxyBudsClient/pull/729)
