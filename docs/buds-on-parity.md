@@ -37,6 +37,8 @@ The revision 3 saved-trace reader matched one outgoing Galaxy Book frame on the 
 
 Battery, standard EQ, media/call touch controls and experimental gaming/pause paths already have dedicated implementations. Generic feature flags for other Pro capabilities need a model-specific audit. Firmware flashing stays disabled under the project requirements.
 
+The 1.2 Mac host setup run on November 27 opened the outgoing channel, then stopped before it attempted the write. The same 1.2 error covered missing service-class evidence on the open device and a changed RFCOMM channel number. The report cannot distinguish those cases. Version 1.3 checks equivalent cached entries for the same service record, can request fresh service information on the open device, and reports the reason when verification stops setup.
+
 References:
 - [Upstream MDE implementation and hardware discussion](https://github.com/timschneeb/GalaxyBudsClient/pull/729)
 - [Buds4 Pro feature profile at the pinned upstream revision](https://github.com/timschneeb/GalaxyBudsClient/blob/85dfc8bb39fc45d3c30ecf71ab2c663fb1d41729/GalaxyBudsClient/Model/Specifications/Buds4ProDeviceSpec.cs)

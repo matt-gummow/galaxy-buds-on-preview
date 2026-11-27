@@ -32,6 +32,7 @@ static NSTextField *label(NSString *text, CGFloat size, NSFontWeight weight) {
 @property (nonatomic) BOOL ended;
 @property (nonatomic) BOOL reported;
 @property (nonatomic) BOOL hostSetup;
+@property (nonatomic) BOOL writeAttempted;
 @property (nonatomic) BOOL sent;
 @end
 
@@ -147,7 +148,8 @@ static NSTextField *label(NSString *text, CGFloat size, NSFontWeight weight) {
     [self.events removeAllObjects];
     NSString *blocked = [self preflightBlocker];
     if (blocked) {
-        self.status.stringValue = blocked;
+        self.status.stringValue = self.hostSetup
+            ? [blocked stringByAppendingString:@" No setup write was attempted."] : blocked;
         [self addEvent:[@"Preflight stopped. " stringByAppendingString:blocked]];
         return;
     }
@@ -171,12 +173,16 @@ static NSTextField *label(NSString *text, CGFloat size, NSFontWeight weight) {
 - (void)transportStage:(NSString *)stage detail:(NSString *)detail {
     if (self.ended) return;
     [self addEvent:[NSString stringWithFormat:@"Transport %@. %@", stage, detail ?: @""]];
-    if ([stage isEqualToString:@"opened"]) {
+    if ([stage isEqualToString:@"discovering"]) {
+        self.status.stringValue = self.hostSetup
+            ? @"Checking the Buds’ Samsung control service. No setup write has been attempted."
+            : @"Checking the Buds’ Samsung control service. Keep listening.";
+    } else if ([stage isEqualToString:@"opened"]) {
         if (self.opened) return;
         self.opened = YES;
         self.openedTime = NSProcessInfo.processInfo.systemUptime;
         if (self.hostSetup) {
-            self.status.stringValue = @"Channel open. Waiting for the Mac to finish the setup write…";
+            self.status.stringValue = @"Channel open. No setup write has been attempted.";
             return;
         }
         self.status.stringValue = @"The channel opened. Listen for a few seconds, then choose what you heard.";
@@ -185,17 +191,23 @@ static NSTextField *label(NSString *text, CGFloat size, NSFontWeight weight) {
             (void)timer;
             [weakSelf tick];
         }];
+    } else if (self.hostSetup && [stage isEqualToString:@"writing"]) {
+        self.writeAttempted = YES;
+        self.status.stringValue = @"The Mac attempted one setup write. Waiting for local completion…";
     } else if (self.hostSetup && [stage isEqualToString:@"sent"]) {
+        self.writeAttempted = YES;
         self.sent = YES;
         self.ended = YES;
         [self.transport stop];
-        self.status.stringValue = @"The Mac sent the setup message. With the Mac connected, reconnect the Fold once. Check whether both stay connected, then try Mac music, a Fold call, and music after hang-up. Copy the report and include what you heard.";
+        self.status.stringValue = @"The Mac completed the setup write. Earbud acceptance is unverified. With the Mac connected, reconnect the Fold once. Check whether both stay connected, then try Mac music, a Fold call, and music after hang-up. Copy the report and include what you heard.";
     } else if ([stage isEqualToString:@"closed"] || [stage isEqualToString:@"failed"] ||
                [stage isEqualToString:@"timeout"]) {
         self.ended = YES;
         [self stopObservationTimer];
         self.status.stringValue = self.hostSetup
-            ? [NSString stringWithFormat:@"%@ Setup write unconfirmed. Copy the test report.", detail]
+            ? [NSString stringWithFormat:@"%@ %@ Copy the test report.", detail ?: @"The attempt ended.",
+               self.writeAttempted ? @"Setup write completion unconfirmed."
+                                   : @"No setup write was attempted."]
             : [NSString stringWithFormat:@"%@ Choose what you heard during the attempt.", detail];
         // Terminal transport events own their channel cleanup.
     }
@@ -235,10 +247,12 @@ static NSTextField *label(NSString *text, CGFloat size, NSFontWeight weight) {
 - (NSString *)reportText {
     NSString *body = [self.events componentsJoinedByString:@"\n"];
     NSString *result;
-    if (!self.attempted) result = @"No opening attempt was made.";
+    if (!self.attempted) result = self.hostSetup
+        ? @"No opening attempt was made. No setup write was attempted." : @"No opening attempt was made.";
     else if (self.hostSetup) {
         if (self.sent) result = @"Mac completed one setup write. Earbud acceptance and audio behavior remain unverified.";
-        else if (self.ended && !self.opened) result = @"The control channel did not finish opening. No setup write was attempted.";
+        else if (!self.writeAttempted) result = self.ended
+            ? @"No setup write was attempted." : @"No setup write has been attempted.";
         else result = @"Setup write completion unconfirmed.";
     } else result = self.reported ? @"Listener observation recorded." : @"Listener observation pending.";
     NSString *start = self.startDate ? [[NSISO8601DateFormatter new] stringFromDate:self.startDate] : @"Unknown";

@@ -6,8 +6,8 @@
 <key>CFBundleDisplayName</key><string>Buds On Connection Check</string>
 <key>CFBundleExecutable</key><string>BudsOnConnectionCheck</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.2</string>
-<key>CFBundleVersion</key><string>3</string>
+<key>CFBundleShortVersionString</key><string>1.3</string>
+<key>CFBundleVersion</key><string>4</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSBluetoothAlwaysUsageDescription</key><string>Connect to your paired Galaxy Buds On to observe Fold playback or send the Galaxy Book host setup when you choose it.</string>

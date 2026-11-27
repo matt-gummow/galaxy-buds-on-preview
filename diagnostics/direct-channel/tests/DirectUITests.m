@@ -6,6 +6,8 @@
 
 @interface MockControl : NSObject
 @property(getter=isEnabled) BOOL enabled;
+@property(getter=isHidden) BOOL hidden;
+@property NSInteger selectedSegment;
 @property(copy) NSString *title;
 @property(copy) NSString *stringValue;
 @end
@@ -34,6 +36,10 @@ static NSUInteger listenAttempts;
 
 static TestController *mock(void) {
     TestController *p = [TestController new];
+    p.mode = (id)[MockControl new];
+    p.instructions = (id)[MockControl new];
+    p.choices = (id)[MockControl new];
+    p.startButton = (id)[MockControl new];
     p.status = (id)[MockControl new];
     p.continued = (id)[MockControl new];
     p.stopped = (id)[MockControl new];
@@ -48,6 +54,23 @@ static TestController *mock(void) {
     return p;
 }
 
+static void TestModeSelection(void) {
+    TestController *p = mock();
+    p.attempted = NO;
+    p.mode.selectedSegment = 0;
+    [p selectMode:p.mode];
+    assert(!p.hostSetup && !p.choices.hidden);
+    assert([p.startButton.title isEqualToString:@"Test while Fold music is playing"]);
+    p.mode.selectedSegment = 1;
+    [p selectMode:p.mode];
+    assert(p.hostSetup && p.choices.hidden);
+    assert([p.startButton.title isEqualToString:@"Set up this Mac…"]);
+    p.attempted = YES;
+    p.mode.selectedSegment = 0;
+    [p selectMode:p.mode];
+    assert(p.hostSetup);
+}
+
 static void TestHostSetup(void) {
     TestController *host = mock();
     host.hostSetup = YES;
@@ -58,18 +81,30 @@ static void TestHostSetup(void) {
     host.blocker = @"Missing device";
     [host start:nil];
     assert(!host.attempted && !setupAttempts && [[host reportText] containsString:@"No opening attempt"]);
+    assert([[host reportText] containsString:@"No setup write was attempted"]);
+    assert([host.status.stringValue containsString:@"No setup write was attempted"]);
     host.blocker = nil;
     [host start:nil];
     [host start:nil];
     assert(host.attempted && setupAttempts == 1 && !listenAttempts);
+    assert(!host.mode.enabled && !host.startButton.enabled);
+    [host transportStage:@"discovering" detail:@"Refreshing the selected service"];
+    assert(!host.ended && !host.opened && !host.writeAttempted);
+    assert([host.status.stringValue containsString:@"Checking the Buds"]);
+    assert([[host reportText] containsString:@"No setup write has been attempted"]);
     [host transportStage:@"opened" detail:@"Opened"];
     assert(!host.listeningTimer && !host.stopped.enabled && !host.continued.enabled);
+    assert([[host reportText] containsString:@"No setup write has been attempted"]);
+    [host transportStage:@"writing" detail:@"Local write attempted"];
+    assert(host.writeAttempted && !host.sent && !host.ended);
     assert([[host reportText] containsString:@"Setup write completion unconfirmed"]);
     [host record:host.stopped];
     assert(!host.reported && !host.ended);
     [host transportStage:@"sent" detail:@"Local write completed"];
     assert(host.ended && host.sent && !host.reported);
     assert([[host reportText] containsString:@"Mac completed one setup write"]);
+    assert([[host reportText] containsString:@"Earbud acceptance and audio behavior remain unverified"]);
+    assert([host.status.stringValue containsString:@"Earbud acceptance is unverified"]);
     assert(![[host reportText] containsString:@"Listener observation"]);
     [host transportStage:@"closed" detail:@"Late closure"];
     assert(![[host reportText] containsString:@"Late closure"]);
@@ -78,10 +113,28 @@ static void TestHostSetup(void) {
         TestController *interrupted = mock();
         interrupted.hostSetup = YES;
         [interrupted transportStage:@"opened" detail:@"Opened"];
+        [interrupted transportStage:@"writing" detail:@"Local write attempted"];
         [interrupted transportStage:stage detail:@"Write did not complete"];
         [interrupted transportStage:@"sent" detail:@"Late callback"];
         assert(interrupted.ended && !interrupted.sent);
         assert([[interrupted reportText] containsString:@"Setup write completion unconfirmed"]);
+        assert(![[interrupted reportText] containsString:@"No setup write was attempted"]);
+    }
+    // Discovery, channel opening and a valid target are prerequisites, not writes.
+    for (NSString *progress in @[@"discovering", @"opened"]) {
+        for (NSString *stage in @[@"failed", @"closed", @"timeout"]) {
+            TestController *unwritten = mock();
+            unwritten.hostSetup = YES;
+            [unwritten transportStage:progress detail:@"Still checking the target"];
+            [unwritten transportStage:stage detail:@"Target could not be verified"];
+            [unwritten transportStage:@"writing" detail:@"Late attempt callback"];
+            [unwritten transportStage:@"sent" detail:@"Late completion callback"];
+            assert(unwritten.ended && !unwritten.sent && !unwritten.writeAttempted);
+            assert([unwritten.status.stringValue containsString:@"No setup write was attempted"]);
+            assert([[unwritten reportText] containsString:@"No setup write was attempted"]);
+            assert(![[unwritten reportText] containsString:@"completion unconfirmed"]);
+            assert(![[unwritten reportText] containsString:@"Late"]);
+        }
     }
     TestController *closed = mock();
     closed.hostSetup = YES;
@@ -89,6 +142,7 @@ static void TestHostSetup(void) {
     [closed windowWillClose:[NSNotification notificationWithName:NSWindowWillCloseNotification object:nil]];
     [closed transportStage:@"sent" detail:@"Late callback"];
     assert(closed.ended && !closed.sent && ![[closed reportText] containsString:@"Late callback"]);
+    assert([[closed reportText] containsString:@"No setup write was attempted"]);
     TestController *listen = mock();
     listen.attempted = NO;
     [listen start:nil];
@@ -104,6 +158,8 @@ int main(void) { @autoreleasepool {
     assert(pre.ended && pre.reported && !pre.opened && !pre.stopped.enabled);
     assert([pre.status.stringValue containsString:@"unconfirmed"]);
     ProbeController *ok = mock();
+    [ok transportStage:@"discovering" detail:@"Refreshing the selected service"];
+    assert(!ok.ended && !ok.opened && !ok.continued.enabled && ok.stopped.enabled);
     [ok transportStage:@"opened" detail:@"opened"];
     assert(ok.opened && !ok.continued.enabled);
     ok.openedTime -= 4;
@@ -119,6 +175,7 @@ int main(void) { @autoreleasepool {
     assert(failed.ended && !failed.opened && failed.continued.enabled);
     [failed record:failed.continued];
     assert([failed.status.stringValue containsString:@"unconfirmed"]);
+    TestModeSelection();
     TestHostSetup();
     puts("UI state fixtures passed");
 } return 0; }

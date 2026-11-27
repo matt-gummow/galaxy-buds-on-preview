@@ -6,6 +6,7 @@
 - (NSArray *)pairedDevices;
 - (void)checkTimeout;
 - (void)checkWriteTimeout;
+- (void)checkServiceQueryTimeout;
 @end
 
 @interface Element : NSObject
@@ -19,6 +20,7 @@
 
 @interface Record : NSObject
 @property BOOL matches;
+@property BluetoothSDPServiceRecordHandle handle;
 @property BluetoothRFCOMMChannelID number;
 @property(strong) Element *classes;
 @end
@@ -38,7 +40,10 @@
     NSCAssert(attribute == kBluetoothSDPAttributeIdentifierServiceClassIDList, @"Wrong class attribute");
     return self.classes;
 }
-- (IOReturn)getServiceRecordHandle:(BluetoothSDPServiceRecordHandle *)handle { return kIOReturnError; }
+- (IOReturn)getServiceRecordHandle:(BluetoothSDPServiceRecordHandle *)handle {
+    *handle = self.handle;
+    return self.handle ? kIOReturnSuccess : kIOReturnError;
+}
 @end
 
 @class Peer;
@@ -69,6 +74,10 @@
 - (IOReturn)closeChannel { ++_closes; self.isOpen = NO; return kIOReturnSuccess; }
 @end
 
+@protocol FixtureQueryTarget
+- (void)sdpQueryComplete:(IOBluetoothDevice *)device status:(IOReturn)status;
+@end
+
 @interface Peer : NSObject
 @property(strong) NSArray *services;
 @property(strong) Record *lookup;
@@ -77,9 +86,17 @@
 @property BOOL synchronous;
 @property BOOL openError;
 @property unsigned opens;
+@property unsigned queries;
+@property IOReturn queryStartStatus;
+@property(weak) id<FixtureQueryTarget> queryTarget;
 @end
 @implementation Peer
 - (id)getServiceRecordForUUID:(id)uuid { return self.lookup; }
+- (IOReturn)performSDPQuery:(id)target {
+    ++_queries;
+    _queryTarget = target;
+    return self.queryStartStatus;
+}
 - (IOReturn)openRFCOMMChannelAsync:(IOBluetoothRFCOMMChannel **)output withChannelID:(BluetoothRFCOMMChannelID)number delegate:(id)delegate {
     NSCAssert(number == 7, @"Unexpected channel");
     ++_opens;
@@ -163,7 +180,7 @@ static void ExpectOpen(Rig *rig) {
     NSCAssert(([rig.steps isEqual:@[@"opening", @"opened"]]), @"Expected one confirmed channel open");
     [rig stop];
     for (Peer *peer in rig.paired)
-        NSCAssert(!peer.channel.writes, @"The connection check never sends setup");
+        NSCAssert(!peer.channel.writes && !peer.queries, @"The connection check never requests discovery or sends setup");
 }
 
 static void TestDuplicatePairedRows(void) {
@@ -239,21 +256,17 @@ static void TestBookHostSetup(void) {
     Channel *channel = verified.channel;
     NSCAssert(!rig.peer.opens && !rig.peer.channel.writes && channel.writes == 1 &&
               [channel.frame isEqual:expected], @"Use the verified alias and send only the reference frame");
-    NSCAssert(([rig.steps isEqual:@[@"opening", @"opened"]]), @"Queueing alone is not a confirmed write");
+    NSCAssert(([rig.steps isEqual:@[@"opening", @"opened", @"writing"]]), @"Queueing alone is not a confirmed write");
     [channel.receiver rfcommChannelOpenComplete:(id)channel status:kIOReturnSuccess];
     [channel.receiver rfcommChannelWriteComplete:(id)channel refcon:NULL status:kIOReturnSuccess];
     Drain();
-    NSCAssert(channel.writes == 1 && [rig.steps.lastObject isEqual:@"opened"], @"Ignore duplicate open or unrelated write");
+    NSCAssert(channel.writes == 1 && [rig.steps.lastObject isEqual:@"writing"], @"Ignore duplicate open or unrelated write");
     [channel.receiver rfcommChannelWriteComplete:(id)channel refcon:channel.token status:kIOReturnSuccess];
     Drain();
-    NSCAssert(([rig.steps isEqual:@[@"opening", @"opened", @"sent"]] && channel.closes == 1),
+    NSCAssert(([rig.steps isEqual:@[@"opening", @"opened", @"writing", @"sent"]] && channel.closes == 1),
               @"Confirm the local write once and close its channel");
     [rig beginSetup]; Drain();
     NSCAssert(channel.writes == 1 && verified.opens == 1, @"Never retry the setup");
-
-    rig = [Rig new]; [rig beginSetup]; Drain();
-    NSCAssert([rig.steps.lastObject isEqual:@"failed"] && !rig.peer.channel.writes,
-              @"A receive-only service match cannot authorize a write");
 
     rig = [Rig new]; MarkSamsungService(rig.peer);
     rig.peer.synchronous = NO; [rig beginSetup];
@@ -261,8 +274,11 @@ static void TestBookHostSetup(void) {
     rig.peer.channel.isOpen = YES;
     [rig.peer.channel.receiver rfcommChannelOpenComplete:(id)rig.peer.channel status:kIOReturnSuccess];
     Drain();
+    NSCAssert(rig.peer.queries == 1 && !rig.peer.channel.writes,
+              @"Loss of the service class after opening requires fresh proof");
+    [rig.peer.queryTarget sdpQueryComplete:(id)rig.peer status:kIOReturnSuccess]; Drain();
     NSCAssert([rig.steps.lastObject isEqual:@"failed"] && !rig.peer.channel.writes,
-              @"Verify the service class again on the opened channel");
+              @"A successful discovery without proof cannot authorize setup");
 
     rig = [Rig new]; MarkSamsungService(rig.peer);
     rig.peer.channel.mtu = (UInt16)expected.length - 1; [rig beginSetup]; Drain();
@@ -299,9 +315,130 @@ static void TestBookHostSetup(void) {
     NSCAssert(!rig.peer.channel.writes && rig.peer.channel.closes == 1, @"A cancelled open must never write");
 }
 
+// The open can return a different wrapper for the same address. A service
+// handle identifies a record on that device even when only one wrapper has its class list.
+static Rig *OpenWithAlias(Peer *livePeer, BluetoothSDPServiceRecordHandle pairedHandle) {
+    Rig *rig = [Rig new];
+    rig.peer.lookup.handle = pairedHandle;
+    MarkSamsungService(rig.peer);
+    rig.peer.channel.peer = livePeer;
+    [rig beginSetup]; Drain();
+    return rig;
+}
+
+static void CompleteQuery(Peer *peer, IOReturn status) {
+    NSCAssert(peer.queries == 1 && peer.queryTarget, @"A pending service query should have a callback target");
+    [peer.queryTarget sdpQueryComplete:(id)peer status:status]; Drain();
+}
+
+static void TestOpenChannelIdentity(void) {
+    Peer *live = PairedBuds();
+    live.lookup.handle = 0x10011;
+    Rig *rig = OpenWithAlias(live, live.lookup.handle);
+    NSCAssert(rig.peer.channel.writes == 1 && !live.queries,
+              @"Equivalent records on the selected Buds should authorize one write");
+    [rig stop];
+
+    // A different service or an unknown handle cannot borrow the verified class.
+    for (NSNumber *handle in @[@0, @0x10012]) {
+        live = PairedBuds();
+        live.lookup.handle = handle.unsignedIntValue;
+        rig = OpenWithAlias(live, 0x10011);
+        NSCAssert(!rig.peer.channel.writes, @"Unproven records cannot borrow class evidence");
+        if (live.queries) CompleteQuery(live, kIOReturnSuccess);
+        NSCAssert([rig.steps.lastObject isEqual:@"failed"] && !rig.peer.channel.writes,
+                  @"Unrelated or absent service handles must not authorize setup");
+    }
+
+    live = PairedBuds();
+    live.lookup.number = 11;
+    rig = OpenWithAlias(live, 0x10011);
+    NSCAssert([rig.steps.lastObject isEqual:@"failed"] && !live.queries && !rig.peer.channel.writes,
+              @"A verified service on a different RFCOMM number cannot identify the open channel");
+
+    live = PairedBuds();
+    Record *competitor = [Record new];
+    competitor.number = live.lookup.number;
+    live.services = @[live.lookup, competitor];
+    rig = OpenWithAlias(live, 0x10011);
+    NSCAssert([rig.steps.lastObject isEqual:@"failed"] && !live.queries && !rig.peer.channel.writes,
+              @"A channel claimed by two records is ambiguous");
+
+    live = PairedBuds();
+    Element *list = [Element new], *otherClass = [Element new];
+    otherClass.uuid = [IOBluetoothSDPUUID uuid16:0x1101]; list.children = @[otherClass];
+    live.lookup.classes = list;
+    live.lookup.handle = 0x10011;
+    rig = OpenWithAlias(live, live.lookup.handle);
+    NSCAssert([rig.steps.lastObject isEqual:@"failed"] && !live.queries && !rig.peer.channel.writes,
+              @"An explicit conflicting class on the actual record overrides an agreeing alias");
+}
+
+static Rig *BeginDiscovery(void) {
+    Rig *rig = [Rig new];
+    [rig beginSetup]; Drain();
+    NSCAssert(rig.peer.queries == 1 && !rig.peer.channel.writes && rig.peer.channel.isOpen,
+              @"Unclassified live channel should request discovery once, without writing");
+    return rig;
+}
+
+static void TestServiceDiscovery(void) {
+    Rig *rig = BeginDiscovery();
+    Channel *channel = rig.peer.channel;
+    id<FixtureQueryTarget> receiver = rig.peer.queryTarget;
+    [receiver sdpQueryComplete:(id)PairedBuds() status:kIOReturnSuccess]; Drain();
+    NSCAssert(!channel.writes && channel.isOpen, @"A callback for a different peer is irrelevant");
+    MarkSamsungService(rig.peer);
+    CompleteQuery(rig.peer, kIOReturnSuccess);
+    NSCAssert(channel.writes == 1 && rig.peer.queries == 1, @"Refreshed service proof permits one write");
+    [receiver sdpQueryComplete:(id)rig.peer status:kIOReturnSuccess]; Drain();
+    NSCAssert(channel.writes == 1, @"Duplicate service completions cannot repeat a write");
+    [rig stop];
+
+    rig = [Rig new]; rig.peer.queryStartStatus = kIOReturnError;
+    [rig beginSetup]; Drain();
+    NSCAssert([rig.steps.lastObject isEqual:@"failed"] && !rig.peer.channel.writes && rig.peer.channel.closes == 1,
+              @"A failed query start should close once without writing");
+
+    rig = BeginDiscovery();
+    MarkSamsungService(rig.peer);
+    CompleteQuery(rig.peer, kIOReturnError);
+    NSCAssert([rig.steps.lastObject isEqual:@"failed"] && !rig.peer.channel.writes && rig.peer.channel.closes == 1,
+              @"A failed service refresh cannot authorize a write");
+
+    rig = BeginDiscovery();
+    MarkSamsungService(rig.peer);
+    rig.settings = @{};
+    CompleteQuery(rig.peer, kIOReturnSuccess);
+    NSCAssert([rig.steps.lastObject isEqual:@"failed"] && !rig.peer.channel.writes,
+              @"A changed selected device must prevent the post-discovery write");
+
+    rig = BeginDiscovery();
+    MarkSamsungService(rig.peer);
+    rig.peer.lookup.number = 11;
+    CompleteQuery(rig.peer, kIOReturnSuccess);
+    NSCAssert([rig.steps.lastObject isEqual:@"failed"] && !rig.peer.channel.writes && rig.peer.queries == 1,
+              @"Discovery cannot retarget the write to a different RFCOMM channel");
+
+    for (NSNumber *cancel in @[@YES, @NO]) {
+        rig = BeginDiscovery();
+        receiver = rig.peer.queryTarget;
+        if (cancel.boolValue) [rig stop]; else [rig checkServiceQueryTimeout];
+        NSArray *events = [rig.steps copy];
+        MarkSamsungService(rig.peer);
+        [receiver sdpQueryComplete:(id)rig.peer status:kIOReturnSuccess]; Drain();
+        NSCAssert(!rig.peer.channel.writes && rig.peer.channel.closes == 1 && [rig.steps isEqual:events],
+                  @"A successful late callback must respect cancellation or timeout");
+        if (!cancel.boolValue)
+            NSCAssert([events.lastObject isEqual:@"timeout"], @"A service deadline must end the test");
+    }
+}
+
 int main(void) { @autoreleasepool {
     TestDuplicatePairedRows();
     TestBookHostSetup();
+    TestOpenChannelIdentity();
+    TestServiceDiscovery();
     Rig *rig = [Rig new];
     NSCAssert(![rig preflight] && !rig.peer.opens, @"Preflight must be passive");
     [rig begin]; Drain();
