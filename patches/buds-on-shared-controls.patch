@@ -1,5 +1,5 @@
 diff --git a/GalaxyBudsClient/Interface/Pages/EqualizerPage.axaml b/GalaxyBudsClient/Interface/Pages/EqualizerPage.axaml
-index 8602e25..e6234ee 100644
+index 8602e25c..e6234ee0 100644
 --- a/GalaxyBudsClient/Interface/Pages/EqualizerPage.axaml
 +++ b/GalaxyBudsClient/Interface/Pages/EqualizerPage.axaml
 @@ -21,31 +21,12 @@
@@ -57,7 +57,7 @@ index 8602e25..e6234ee 100644
                  <Interaction.Behaviors>
                      <ext:RequiresFeatureBehavior Feature="CustomEqualizer" />
 diff --git a/GalaxyBudsClient/Interface/Pages/EqualizerPage.axaml.cs b/GalaxyBudsClient/Interface/Pages/EqualizerPage.axaml.cs
-index ddc2b73..92dd602 100644
+index ddc2b73e..92dd6025 100644
 --- a/GalaxyBudsClient/Interface/Pages/EqualizerPage.axaml.cs
 +++ b/GalaxyBudsClient/Interface/Pages/EqualizerPage.axaml.cs
 @@ -1,6 +1,4 @@
@@ -171,7 +171,7 @@ index ddc2b73..92dd602 100644
      {
          if (_budsOnEqualizerActionOpen)
 diff --git a/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml b/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml
-index b0488b0..a07d916 100644
+index b0488b05..a07d9168 100644
 --- a/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml
 +++ b/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml
 @@ -27,42 +27,26 @@
@@ -237,7 +237,7 @@ index b0488b0..a07d916 100644
                          Content="Volume on left hold"
                          Description="{Binding BudsOnLeftHoldVolume.Description}"
 diff --git a/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml.cs b/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml.cs
-index ee5885a..df63203 100644
+index ee5885a0..df632039 100644
 --- a/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml.cs
 +++ b/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml.cs
 @@ -18,15 +18,6 @@ public partial class TouchpadPage : BasePage<TouchpadPageViewModel>
@@ -269,10 +269,18 @@ index ee5885a..df63203 100644
          finally
          {
 diff --git a/GalaxyBudsClient/Interface/ViewModels/Pages/EqualizerPageViewModel.cs b/GalaxyBudsClient/Interface/ViewModels/Pages/EqualizerPageViewModel.cs
-index 32ebf8a..5bc6828 100644
+index 32ebf8a9..753bd7f3 100644
 --- a/GalaxyBudsClient/Interface/ViewModels/Pages/EqualizerPageViewModel.cs
 +++ b/GalaxyBudsClient/Interface/ViewModels/Pages/EqualizerPageViewModel.cs
-@@ -23,18 +23,50 @@ namespace GalaxyBudsClient.Interface.ViewModels.Pages;
+@@ -12,6 +12,7 @@ using GalaxyBudsClient.Message;
+ using GalaxyBudsClient.Message.Decoder;
+ using GalaxyBudsClient.Message.Encoder;
+ using GalaxyBudsClient.Model;
++using GalaxyBudsClient.Model.Config;
+ using GalaxyBudsClient.Model.Constants;
+ using GalaxyBudsClient.Model.Specifications;
+ using GalaxyBudsClient.Platform;
+@@ -23,18 +24,50 @@ namespace GalaxyBudsClient.Interface.ViewModels.Pages;
  
  public partial class EqualizerPageViewModel : MainPageViewModelBase
  {
@@ -331,7 +339,7 @@ index 32ebf8a..5bc6828 100644
  
      public EqualizerPageViewModel()
      {
-@@ -62,31 +94,118 @@ public partial class EqualizerPageViewModel : MainPageViewModelBase
+@@ -62,31 +95,118 @@ public partial class EqualizerPageViewModel : MainPageViewModelBase
      private void RefreshBudsOnEqualizer()
      {
          var bluetooth = BluetoothImpl.Instance;
@@ -465,7 +473,7 @@ index 32ebf8a..5bc6828 100644
      private void OnAnyMessageDecoded(object? sender, BaseMessageDecoder decoder)
      {
          // Custom EQ display is driven by the app's saved slots (see OnExtendedStatusUpdate and
-@@ -275,8 +394,12 @@ public partial class EqualizerPageViewModel : MainPageViewModelBase
+@@ -275,8 +395,12 @@ public partial class EqualizerPageViewModel : MainPageViewModelBase
  
      private async void OnPropertyChanged(object? sender, PropertyChangedEventArgs args)
      {
@@ -479,7 +487,7 @@ index 32ebf8a..5bc6828 100644
  
          // async void: an unobserved exception from a BT send would crash the app — guard the handler.
          try
-@@ -410,6 +533,9 @@ public partial class EqualizerPageViewModel : MainPageViewModelBase
+@@ -410,6 +534,9 @@ public partial class EqualizerPageViewModel : MainPageViewModelBase
  
      private void OnExtendedStatusUpdate(object? sender, ExtendedStatusUpdateDecoder e)
      {
@@ -490,7 +498,7 @@ index 32ebf8a..5bc6828 100644
          {
              if (BluetoothImpl.Instance.CurrentModel == Models.Buds)
 diff --git a/GalaxyBudsClient/Interface/ViewModels/Pages/TouchpadPageViewModel.cs b/GalaxyBudsClient/Interface/ViewModels/Pages/TouchpadPageViewModel.cs
-index 4692e20..516ffb4 100644
+index 4692e209..516ffb42 100644
 --- a/GalaxyBudsClient/Interface/ViewModels/Pages/TouchpadPageViewModel.cs
 +++ b/GalaxyBudsClient/Interface/ViewModels/Pages/TouchpadPageViewModel.cs
 @@ -2,6 +2,7 @@ using System;
