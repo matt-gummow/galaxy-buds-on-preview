@@ -20,6 +20,8 @@ static NSTextField *label(NSString *text, CGFloat size, NSFontWeight weight) {
 @property (nonatomic, strong) NSButton *continued;
 @property (nonatomic, strong) NSButton *stopped;
 @property (nonatomic, strong) NSButton *unsure;
+@property (nonatomic, strong) NSStackView *handoffActions;
+@property (nonatomic, strong) NSButton *foldConnectedButton;
 @property (nonatomic, strong) NSButton *reportButton;
 @property (nonatomic, strong) DirectTransport *transport;
 @property (nonatomic, strong) NSMutableArray<NSString *> *events;
@@ -35,6 +37,9 @@ static NSTextField *label(NSString *text, CGFloat size, NSFontWeight weight) {
 @property (nonatomic) BOOL hostSetup;
 @property (nonatomic) BOOL writeAttempted;
 @property (nonatomic) BOOL sent;
+@property (nonatomic) BOOL foldReconnected;
+@property (nonatomic) BOOL controlChannelClosed;
+@property (nonatomic, copy) NSString *audioResult;
 @end
 
 @implementation ProbeController
@@ -63,11 +68,15 @@ static NSTextField *label(NSString *text, CGFloat size, NSFontWeight weight) {
     self.unsure = [NSButton buttonWithTitle:@"Unsure" target:self action:@selector(record:)];
     self.choices = [NSStackView stackViewWithViews:@[self.continued, self.stopped, self.unsure]];
     self.choices.spacing = 8;
+    self.foldConnectedButton = [NSButton buttonWithTitle:@"Fold reconnected" target:self action:@selector(foldConnected:)];
+    NSButton *finishEarly = [NSButton buttonWithTitle:@"Finish early" target:self action:@selector(finishEarly:)];
+    self.handoffActions = [NSStackView stackViewWithViews:@[self.foldConnectedButton, finishEarly]];
+    self.handoffActions.spacing = 8;
     self.reportButton = [NSButton buttonWithTitle:@"Copy test report" target:self action:@selector(copyReport:)];
     self.reportButton.enabled = NO;
 
     NSStackView *stack = [NSStackView stackViewWithViews:@[self.mode, self.instructions, self.startButton,
-                                                          self.status, self.choices, self.reportButton]];
+                                                          self.status, self.handoffActions, self.choices, self.reportButton]];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
     stack.alignment = NSLayoutAttributeLeading;
     stack.spacing = 13;
@@ -101,11 +110,12 @@ static NSTextField *label(NSString *text, CGFloat size, NSFontWeight weight) {
     if (self.attempted) return;
     self.hostSetup = mode.selectedSegment == 1;
     self.instructions.stringValue = self.hostSetup
-        ? @"Connect the Buds to this Mac, quit Galaxy Buds Manager from its menu bar icon, and leave the Buds out of their case. This experiment sends one host setup message observed on a Galaxy Book."
+        ? @"Connect the Buds to this Mac and confirm you can hear Mac audio. Quit Galaxy Buds Manager from its menu bar icon and leave the Buds out of their case."
         : @"Quit Galaxy Buds Manager from its menu bar icon. Leave the Buds disconnected from the Mac and play music from the Fold through the Buds. Opening the control channel may interrupt playback.";
     self.startButton.title = self.hostSetup ? @"Set up this Mac…" : @"Test while Fold music is playing";
     self.status.stringValue = self.hostSetup ? @"Ready when the Buds are connected to the Mac." : @"Ready when you can hear the Fold.";
-    self.choices.hidden = self.hostSetup;
+    self.continued.title = self.hostSetup ? @"Mac audio audible" : @"Music kept playing";
+    self.stopped.title = self.hostSetup ? @"Mac audio silent" : @"Music stopped";
     [self.events removeAllObjects];
     self.reportButton.enabled = NO;
     self.reportButton.title = @"Copy test report";
@@ -113,7 +123,20 @@ static NSTextField *label(NSString *text, CGFloat size, NSFontWeight weight) {
 }
 
 - (void)updateChoices {
-    BOOL canRecord = !self.hostSetup && self.attempted && !self.reported;
+    if (self.hostSetup) {
+        BOOL observing = self.sent && !self.ended;
+        self.handoffActions.hidden = !observing;
+        self.foldConnectedButton.enabled = observing && !self.foldReconnected;
+        self.choices.hidden = !self.foldReconnected;
+        BOOL canRecord = observing && self.foldReconnected;
+        self.continued.enabled = canRecord;
+        self.stopped.enabled = canRecord;
+        self.unsure.enabled = canRecord;
+        return;
+    }
+    self.handoffActions.hidden = YES;
+    self.choices.hidden = NO;
+    BOOL canRecord = self.attempted && !self.reported;
     self.stopped.enabled = canRecord;
     self.unsure.enabled = canRecord;
     self.continued.enabled = canRecord && (self.ended ||
@@ -130,7 +153,7 @@ static NSTextField *label(NSString *text, CGFloat size, NSFontWeight weight) {
 - (BOOL)confirmHostSetup {
     NSAlert *alert = [NSAlert new];
     alert.messageText = @"Send the Galaxy Book host setup message once?";
-    alert.informativeText = @"This writes the Book’s version 3 host setting to your Buds On and may interrupt audio. Afterward, you can check whether the Fold and Mac stay connected.";
+    alert.informativeText = @"This sends the Book’s version 3 host setting to your Buds On and may interrupt audio. The check will keep its control channel open while you reconnect the Fold.";
     [alert addButtonWithTitle:@"Cancel"];
     [alert addButtonWithTitle:@"Send once"];
     return [alert runModal] == NSAlertSecondButtonReturn;
@@ -197,9 +220,12 @@ static NSTextField *label(NSString *text, CGFloat size, NSFontWeight weight) {
     } else if (self.hostSetup && [stage isEqualToString:@"sent"]) {
         self.writeAttempted = YES;
         self.sent = YES;
-        self.ended = YES;
-        [self.transport stop];
-        self.status.stringValue = @"macOS completed the setup write. Earbud acceptance is unverified. With the Mac connected, reconnect the Fold once. Check whether both stay connected, then try Mac music, a Fold call, and music after hang-up. Copy the report and include what you heard.";
+        [self addEvent:[@"After local write. " stringByAppendingString:[self.transport connectionStatus]]];
+        [self updateHandoffStatus];
+    } else if (self.hostSetup && self.sent && [stage isEqualToString:@"closed"]) {
+        self.controlChannelClosed = YES;
+        [self addEvent:[@"After control channel closed. " stringByAppendingString:[self.transport connectionStatus]]];
+        [self updateHandoffStatus];
     } else if ([stage isEqualToString:@"closed"] || [stage isEqualToString:@"failed"] ||
                [stage isEqualToString:@"timeout"]) {
         self.ended = YES;
@@ -212,6 +238,38 @@ static NSTextField *label(NSString *text, CGFloat size, NSFontWeight weight) {
         // Terminal transport events own their channel cleanup.
     }
     [self updateChoices];
+}
+
+- (void)updateHandoffStatus {
+    NSString *connection = self.controlChannelClosed ? @"The control channel closed during the test."
+        : @"macOS completed the setup write and is leaving the control channel open.";
+    NSString *next = self.foldReconnected
+        ? @"Pause Fold audio if it’s playing. Start or resume Mac audio without using Bluetooth Connect or changing the audio output. Choose what you hear in the Buds."
+        : @"Reconnect the Fold once from its saved Bluetooth pairing, then click Fold reconnected.";
+    self.status.stringValue = [NSString stringWithFormat:@"%@ %@", connection, next];
+}
+
+- (void)foldConnected:(id)sender {
+    if (!self.sent || self.ended || self.foldReconnected) return;
+    self.foldReconnected = YES;
+    [self addEvent:[@"User marked Fold reconnected. " stringByAppendingString:[self.transport connectionStatus]]];
+    [self updateHandoffStatus];
+    [self updateChoices];
+}
+
+- (void)finishHandoffWithAudioResult:(NSString *)audioResult {
+    if (!self.sent || self.ended) return;
+    self.audioResult = audioResult;
+    [self addEvent:[@"End of observation, before app cleanup. " stringByAppendingString:[self.transport connectionStatus]]];
+    if (!audioResult) [self addEvent:@"User finished before recording an audio result."];
+    self.ended = YES;
+    [self.transport stop];
+    self.status.stringValue = @"Observation finished. Copy the test report.";
+    [self updateChoices];
+}
+
+- (void)finishEarly:(id)sender {
+    [self finishHandoffWithAudioResult:nil];
 }
 
 - (void)tick {
@@ -232,7 +290,16 @@ static NSTextField *label(NSString *text, CGFloat size, NSFontWeight weight) {
 }
 
 - (void)record:(NSButton *)button {
-    if (self.hostSetup || self.reported || !self.attempted || !button.enabled) return;
+    if (!self.attempted || !button.enabled) return;
+    if (self.hostSetup) {
+        if (!self.foldReconnected) return;
+        NSString *result = @"Unsure whether Mac audio resumed without reconnecting.";
+        if (button == self.continued) result = @"Mac audio was audible through the Buds without reconnecting.";
+        if (button == self.stopped) result = @"Mac audio was silent in the Buds without reconnecting.";
+        [self finishHandoffWithAudioResult:result];
+        return;
+    }
+    if (self.reported) return;
     self.reported = YES;
     self.ended = YES;
     [self stopObservationTimer];
@@ -250,7 +317,9 @@ static NSTextField *label(NSString *text, CGFloat size, NSFontWeight weight) {
     if (!self.attempted) result = self.hostSetup
         ? @"No opening attempt was made. No setup write was attempted." : @"No opening attempt was made.";
     else if (self.hostSetup) {
-        if (self.sent) result = @"macOS completed one setup write. Earbud acceptance and audio behavior remain unverified.";
+        if (self.sent) result = [NSString stringWithFormat:@"macOS completed one setup write. Earbud acceptance is unverified.\nFold reconnection: %@.\n%@",
+                                 self.foldReconnected ? @"confirmed by user" : @"unconfirmed",
+                                 self.audioResult ?: (self.ended ? @"Mac audio result: unrecorded." : @"Mac audio result pending.")];
         else if (!self.writeAttempted) result = self.ended
             ? @"No setup write was attempted." : @"No setup write has been attempted.";
         else result = @"Setup write completion unconfirmed.";

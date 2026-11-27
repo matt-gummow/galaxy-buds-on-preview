@@ -15,6 +15,7 @@
 static NSUInteger stops;
 static NSUInteger setupAttempts;
 static NSUInteger listenAttempts;
+static NSString *connection;
 @implementation DirectTransport
 - (NSString *)preflight { return nil; }
 - (void)start:(void (^)(NSString *, NSString *))event { ++listenAttempts; }
@@ -23,6 +24,7 @@ static NSUInteger listenAttempts;
     event(@"opening", @"Opening");
 }
 - (void)stop { ++stops; }
+- (NSString *)connectionStatus { return connection; }
 @end
 
 @interface TestController : ProbeController
@@ -44,6 +46,8 @@ static TestController *mock(void) {
     p.continued = (id)[MockControl new];
     p.stopped = (id)[MockControl new];
     p.unsure = (id)[MockControl new];
+    p.handoffActions = (id)[MockControl new];
+    p.foldConnectedButton = (id)[MockControl new];
     p.reportButton = (id)[MockControl new];
     p.stopped.title = @"Music stopped";
     p.continued.title = @"Music kept playing";
@@ -104,15 +108,45 @@ static void TestHostSetup(void) {
     assert([[host reportText] containsString:@"Setup write completion unconfirmed"]);
     [host record:host.stopped];
     assert(!host.reported && !host.ended);
+    NSUInteger stopCount = stops;
+    connection = @"RFCOMM control channel: open. Mac Bluetooth baseband link: connected.";
     [host transportStage:@"sent" detail:@"Local write completed"];
-    assert(host.ended && host.sent && !host.reported);
+    assert(!host.ended && host.sent && !host.reported && stops == stopCount);
+    assert(host.foldConnectedButton.enabled && !host.handoffActions.hidden && host.choices.hidden);
     assert([[host reportText] containsString:@"macOS completed one setup write"]);
     assert([host.status.stringValue containsString:@"macOS completed the setup write"]);
-    assert([[host reportText] containsString:@"Earbud acceptance and audio behavior remain unverified"]);
-    assert([host.status.stringValue containsString:@"Earbud acceptance is unverified"]);
+    assert([[host reportText] containsString:@"Earbud acceptance is unverified"]);
+    assert([[host reportText] containsString:@"After local write. RFCOMM control channel: open"]);
     assert(![[host reportText] containsString:@"Listener observation"]);
-    [host transportStage:@"closed" detail:@"Late closure"];
-    assert(![[host reportText] containsString:@"Late closure"]);
+    connection = @"RFCOMM control channel: closed. Mac Bluetooth baseband link: disconnected.";
+    [host transportStage:@"closed" detail:@"The control channel closed."];
+    assert(!host.ended && host.sent && host.controlChannelClosed && stops == stopCount);
+    assert([[host reportText] containsString:@"After control channel closed. RFCOMM control channel: closed. Mac Bluetooth baseband link: disconnected"]);
+    [host foldConnected:nil];
+    [host foldConnected:nil];
+    assert(host.foldReconnected && !host.foldConnectedButton.enabled && !host.choices.hidden && host.stopped.enabled);
+    assert([[[host reportText] componentsSeparatedByString:@"User marked Fold reconnected."] count] == 2);
+    [host record:host.stopped];
+    assert(host.ended && stops == stopCount + 1);
+    assert([[host reportText] containsString:@"Mac audio was silent in the Buds without reconnecting."]);
+    assert([[host reportText] containsString:@"Fold reconnection: confirmed by user"]);
+    assert(![[host reportText] containsString:@"completion unconfirmed"]);
+
+    for (NSNumber *early in @[@YES, @NO]) {
+        TestController *held = mock();
+        held.hostSetup = YES;
+        connection = @"RFCOMM control channel: open. Mac Bluetooth baseband link: connected.";
+        [held transportStage:@"sent" detail:@"Local write completed"];
+        if (early.boolValue) {
+            [held finishEarly:nil];
+            assert([[held reportText] containsString:@"User finished before recording an audio result"]);
+        } else {
+            [held foldConnected:nil];
+            [held record:held.continued];
+            assert([[held reportText] containsString:@"Mac audio was audible through the Buds without reconnecting"]);
+        }
+        assert(held.ended && [[held reportText] containsString:@"End of observation, before app cleanup. RFCOMM control channel: open"]);
+    }
 
     for (NSString *stage in @[@"failed", @"closed", @"timeout"]) {
         TestController *interrupted = mock();

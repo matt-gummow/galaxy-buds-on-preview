@@ -142,6 +142,7 @@ static BOOL ClaimsChannel(IOBluetoothDevice *device, BluetoothRFCOMMChannelID ex
 
 @implementation DirectTransport {
     IOBluetoothDevice *_peer;
+    IOBluetoothDevice *_livePeer;
     IOBluetoothRFCOMMChannel *_channel;
     BluetoothRFCOMMChannelID _number;
     NSString *_key;
@@ -208,6 +209,15 @@ static BOOL ClaimsChannel(IOBluetoothDevice *device, BluetoothRFCOMMChannelID ex
 - (BOOL)ownsChannel:(IOBluetoothRFCOMMChannel *)channel {
     return channel && channel == _channel && channel.delegate == self && !channel.isIncoming &&
            [channel getChannelID] == _number && [_key isEqual:PeerKey([channel getDevice].addressString)];
+}
+
+- (NSString *)connectionStatus {
+    NSAssert(NSThread.isMainThread, @"Call on main thread");
+    NSString *control = @"unconfirmed";
+    if ([self ownsChannel:_channel]) control = _channel.isOpen ? @"open" : @"closed";
+    else if (_opened && !_channel) control = @"closed";
+    NSString *link = _livePeer ? (_livePeer.isConnected ? @"connected" : @"disconnected") : @"unconfirmed";
+    return [NSString stringWithFormat:@"RFCOMM control channel: %@. Mac Bluetooth baseband link: %@.", control, link];
 }
 
 // Detach only our delegate. Closing the device would also tear down its
@@ -383,7 +393,9 @@ static BOOL ClaimsChannel(IOBluetoothDevice *device, BluetoothRFCOMMChannelID ex
             [self finish:@"failed" detail:@"macOS did not confirm the full setup write. Its delivery is unknown."];
             return;
         }
-        [self finish:@"sent" detail:@"macOS completed the Galaxy Book host setup write. Earbud acceptance is unconfirmed."];
+        self->_awaitingWrite = NO;
+        ProbeEvent callback = self->_event;
+        if (callback) callback(@"sent", @"macOS completed the Galaxy Book host setup write. Earbud acceptance is unconfirmed.");
     });
 }
 
@@ -401,6 +413,7 @@ static BOOL ClaimsChannel(IOBluetoothDevice *device, BluetoothRFCOMMChannelID ex
             return;
         }
         self->_opened = YES;
+        self->_livePeer = [channel getDevice];
         self->_event(@"opened", self->_bookHostSetup ? @"The selected outgoing channel opened." :
                      @"The selected outgoing channel opened. No application data was sent.");
         if (self->_bookHostSetup) [self sendBookHostSetup:channel];

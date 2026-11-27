@@ -80,6 +80,7 @@
 @property(copy) NSString *addressString;
 @property BOOL synchronous;
 @property BOOL openError;
+@property BOOL isConnected;
 @property unsigned opens;
 @property unsigned queries;
 @end
@@ -116,6 +117,7 @@ static Peer *PairedBuds(void) {
     peer.channel.mtu = 127;
     peer.channel.peer = peer;
     peer.synchronous = YES;
+    peer.isConnected = YES;
     return peer;
 }
 
@@ -245,6 +247,8 @@ static void TestBookHostSetup(void) {
     Peer *verified = PairedBuds();
     MarkSamsungService(verified);
     rig.paired = @[rig.peer, verified];
+    Peer *livePeer = PairedBuds();
+    verified.channel.peer = livePeer;
     [rig beginSetup]; Drain();
     Channel *channel = verified.channel;
     NSCAssert(!rig.peer.opens && !rig.peer.channel.writes && channel.writes == 1 &&
@@ -256,10 +260,35 @@ static void TestBookHostSetup(void) {
     NSCAssert(channel.writes == 1 && [rig.steps.lastObject isEqual:@"writing"], @"Ignore duplicate open or unrelated write");
     [channel.receiver rfcommChannelWriteComplete:(id)channel refcon:channel.token status:kIOReturnSuccess];
     Drain();
-    NSCAssert(([rig.steps isEqual:@[@"opening", @"opened", @"verified", @"writing", @"sent"]] && channel.closes == 1),
-              @"Confirm the local write once and close its channel");
+    NSCAssert(([rig.steps isEqual:@[@"opening", @"opened", @"verified", @"writing", @"sent"]] && !channel.closes),
+              @"Confirm the local write once and keep its channel open");
+    NSCAssert([[rig connectionStatus] isEqual:@"RFCOMM control channel: open. Mac Bluetooth baseband link: connected."],
+              @"Read both connections from the live peer");
+    [channel.receiver rfcommChannelWriteComplete:(id)channel refcon:channel.token status:kIOReturnSuccess];
+    Drain();
+    [rig checkWriteTimeout];
+    NSCAssert(rig.steps.count == 5 && channel.isOpen && !channel.closes, @"Duplicate completion or the deadline must not end observation");
+
+    channel.isOpen = NO;
+    [channel.receiver rfcommChannelClosed:(id)channel];
+    Drain();
+    NSCAssert([rig.steps.lastObject isEqual:@"closed"] && !channel.closes && !channel.receiver,
+              @"Report a remote closure without asking the channel to close again");
+    NSCAssert([[rig connectionStatus] isEqual:@"RFCOMM control channel: closed. Mac Bluetooth baseband link: connected."],
+              @"The baseband can survive a closure");
+    livePeer.isConnected = NO;
+    NSCAssert([[rig connectionStatus] isEqual:@"RFCOMM control channel: closed. Mac Bluetooth baseband link: disconnected."],
+              @"After the closure, continue to read the baseband from the actual live peer");
     [rig beginSetup]; Drain();
     NSCAssert(channel.writes == 1 && verified.opens == 1, @"Never retry the setup");
+
+    rig = [Rig new]; [rig beginSetup]; Drain();
+    channel = rig.peer.channel;
+    [channel.receiver rfcommChannelWriteComplete:(id)channel refcon:channel.token status:kIOReturnSuccess];
+    Drain();
+    [rig stop]; [rig stop];
+    NSCAssert(channel.closes == 1 && channel.writes == 1 && [rig.steps.lastObject isEqual:@"sent"],
+              @"Finishing observation closes the original channel once");
 
     rig = [Rig new]; MarkSamsungService(rig.peer);
     rig.peer.synchronous = NO; [rig beginSetup];
