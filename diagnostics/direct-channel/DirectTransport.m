@@ -42,21 +42,42 @@ static NSString *SelectedPeerKey(id json) {
     return matches == 1 ? key : nil;
 }
 
-static BOOL SameRecord(IOBluetoothSDPServiceRecord *a, IOBluetoothSDPServiceRecord *b) {
-    if (!a || !b) return NO;
-    if (a == b) return YES;
-    BluetoothSDPServiceRecordHandle first = 0, second = 0;
-    return [a getServiceRecordHandle:&first] == kIOReturnSuccess &&
-           [b getServiceRecordHandle:&second] == kIOReturnSuccess && first && first == second;
+static BluetoothSDPServiceRecordHandle KnownHandle(IOBluetoothSDPServiceRecord *record) {
+    BluetoothSDPServiceRecordHandle handle = 0;
+    return record && [record getServiceRecordHandle:&handle] == kIOReturnSuccess ? handle : 0;
+}
+
+static BOOL AgreeOnHandle(BluetoothSDPServiceRecordHandle *known, BluetoothSDPServiceRecordHandle next) {
+    if (*known && next && *known != next) return NO;
+    if (next) *known = next;
+    return YES;
 }
 
 @interface ControlService : NSObject
 @property BluetoothRFCOMMChannelID number;
-@property(strong) IOBluetoothSDPServiceRecord *record;
-@property(copy) NSString *classIssue;
+@property BluetoothSDPServiceRecordHandle handle;
+@property BOOL hasVendorClass;
 @end
 @implementation ControlService
 @end
+
+// Apple's service search matches the exact UUID in any attribute. A readable
+// class list can confirm the vendor class or contradict that service mapping.
+static BOOL CheckClassList(IOBluetoothSDPServiceRecord *record, IOBluetoothSDPUUID *uuid, BOOL *vendorClass) {
+    NSArray *entries = [[record getAttributeDataElement:kBluetoothSDPAttributeIdentifierServiceClassIDList] getArrayValue];
+    BOOL hasDecodedClass = NO;
+    for (id item in entries) {
+        IOBluetoothSDPUUID *value = [item isKindOfClass:IOBluetoothSDPUUID.class] ? item :
+                                    ([item respondsToSelector:@selector(getUUIDValue)] ? [item getUUIDValue] : nil);
+        if (![value isKindOfClass:IOBluetoothSDPUUID.class]) continue;
+        hasDecodedClass = YES;
+        if ([value isEqualToUUID:uuid]) {
+            *vendorClass = YES;
+            return YES;
+        }
+    }
+    return !hasDecodedClass;
+}
 
 static NSString *FindCachedChannel(IOBluetoothDevice *device, ControlService *service, BOOL *missing) {
     *missing = NO;
@@ -86,34 +107,24 @@ static NSString *FindCachedChannel(IOBluetoothDevice *device, ControlService *se
     }
     if (!matches) return @"The cached service list could not confirm the Samsung control UUID lookup.";
     if (matches > 1) return [NSString stringWithFormat:@"%lu cached records contain Samsung’s control UUID.", (unsigned long)matches];
-    if (!SameRecord(match, lookup)) return @"The Samsung control UUID lookup and cached record list disagree.";
     BluetoothRFCOMMChannelID selected = 0;
     if ([match getRFCOMMChannelID:&selected] != kIOReturnSuccess || selected < 1 || selected > 30)
         return @"The matching cached record has no valid RFCOMM channel number.";
     if (uses[selected] != 1)
         return [NSString stringWithFormat:@"%u cached service records claim the channel for Samsung’s control UUID.", uses[selected]];
-    // Apple searches all attributes for a UUID. Require the vendor class if
-    // classes are readable. Incomplete caches can establish only a record
-    // match, sufficient for this receive-only observation.
-    IOBluetoothSDPDataElement *classes = [match getAttributeDataElement:kBluetoothSDPAttributeIdentifierServiceClassIDList];
-    NSArray *entries = [classes getArrayValue];
-    BOOL hasDecodedClass = NO;
-    BOOL contains = NO;
-    for (id item in entries) {
-        IOBluetoothSDPUUID *value = [item isKindOfClass:IOBluetoothSDPUUID.class] ? item :
-                                    ([item respondsToSelector:@selector(getUUIDValue)] ? [item getUUIDValue] : nil);
-        if (![value isKindOfClass:IOBluetoothSDPUUID.class]) continue;
-        hasDecodedClass = YES;
-        if ([value isEqualToUUID:uuid]) contains = YES;
-    }
-    if (hasDecodedClass && !contains) return @"The cached service classes contradict the Samsung control UUID lookup.";
-    if (!contains) {
-        if (!classes) service.classIssue = @"The Samsung record has no service-class attribute.";
-        else if (!entries) service.classIssue = @"The Samsung record’s service-class attribute is not a list.";
-        else if (!entries.count) service.classIssue = @"The Samsung record’s service-class list is empty.";
-        else service.classIssue = @"The Samsung record’s service-class list contains no decodable UUIDs.";
-    }
-    service.record = match;
+    BluetoothRFCOMMChannelID lookedUp = 0;
+    if (!lookup || ![lookup matchesUUIDArray:@[uuid]] ||
+        [lookup getRFCOMMChannelID:&lookedUp] != kIOReturnSuccess || lookedUp != selected)
+        return @"The Samsung control UUID lookup and cached record list disagree.";
+    BluetoothSDPServiceRecordHandle handle = KnownHandle(match);
+    if (!AgreeOnHandle(&handle, KnownHandle(lookup)))
+        return @"The Samsung control UUID lookup and cached record have different service handles.";
+    BOOL vendorClass = NO;
+    if (!CheckClassList(match, uuid, &vendorClass) ||
+        (lookup != match && !CheckClassList(lookup, uuid, &vendorClass)))
+        return @"The cached service classes contradict the Samsung control UUID lookup.";
+    service.hasVendorClass = vendorClass;
+    service.handle = handle;
     service.number = selected;
     return nil;
 }
@@ -124,11 +135,6 @@ static BOOL ClaimsChannel(IOBluetoothDevice *device, BluetoothRFCOMMChannelID ex
         if ([record getRFCOMMChannelID:&number] == kIOReturnSuccess && number == expected) return YES;
     }
     return NO;
-}
-
-static BluetoothSDPServiceRecordHandle KnownHandle(IOBluetoothSDPServiceRecord *record) {
-    BluetoothSDPServiceRecordHandle handle = 0;
-    return record && [record getServiceRecordHandle:&handle] == kIOReturnSuccess ? handle : 0;
 }
 
 @interface DirectTransport () <IOBluetoothRFCOMMChannelDelegate>
@@ -145,8 +151,7 @@ static BluetoothSDPServiceRecordHandle KnownHandle(IOBluetoothSDPServiceRecord *
     BOOL _awaitingCompletion;
     BOOL _closeRequested;
     BOOL _bookHostSetup;
-    IOBluetoothDevice *_queryDevice;
-    BOOL _queryAttempted;
+    BluetoothSDPServiceRecordHandle _openingHandle;
     BOOL _writeAttempted;
     BOOL _awaitingWrite;
 }
@@ -161,16 +166,18 @@ static BluetoothSDPServiceRecordHandle KnownHandle(IOBluetoothSDPServiceRecord *
 
 - (NSArray *)pairedDevices { return [IOBluetoothDevice pairedDevices]; }
 
-- (NSString *)resolveKey:(NSString *)key peer:(IOBluetoothDevice **)peer number:(BluetoothRFCOMMChannelID *)selected {
-    *peer = nil;
-    *selected = 0;
-    if (!key) return @"The client settings do not identify one selected Galaxy Buds On.";
+- (NSString *)resolve {
+    _peer = nil;
+    _number = 0;
+    _openingHandle = 0;
+    _key = SelectedPeerKey([self clientSettings]);
+    if (!_key) return @"The client settings do not identify one selected Galaxy Buds On.";
     NSString *unavailable = @"The selected Buds On are absent from the Mac’s paired-device list. Check Bluetooth access for this diagnostic.";
     BOOL selectedHasVendorClass = NO;
     for (IOBluetoothDevice *device in [self pairedDevices]) {
-        if (![key isEqual:PeerKey(device.addressString)]) continue;
+        if (![_key isEqual:PeerKey(device.addressString)]) continue;
 
-        // macOS may list the same address more than once, with different cached services.
+        // Different paired rows for the same address may have different cache coverage.
         ControlService *service = [ControlService new];
         BOOL missing;
         NSString *reason = FindCachedChannel(device, service, &missing);
@@ -179,23 +186,17 @@ static BluetoothSDPServiceRecordHandle KnownHandle(IOBluetoothSDPServiceRecord *
             continue;
         }
         if (reason) return reason;
-        if (*peer && *selected != service.number)
+        if (_peer && _number != service.number)
             return @"Cached records for the same Buds On disagree about Samsung’s control channel.";
-        if (!*peer || (_bookHostSetup && !service.classIssue && !selectedHasVendorClass)) {
-            *peer = device;
-            *selected = service.number;
-            selectedHasVendorClass = !service.classIssue;
+        if (_bookHostSetup && !AgreeOnHandle(&_openingHandle, service.handle))
+            return @"Paired records for the Samsung service have conflicting handles.";
+        if (!_peer || (_bookHostSetup && service.hasVendorClass && !selectedHasVendorClass)) {
+            _peer = device;
+            _number = service.number;
+            selectedHasVendorClass = service.hasVendorClass;
         }
     }
-    return *peer ? nil : unavailable;
-}
-
-- (NSString *)resolve {
-    _key = SelectedPeerKey([self clientSettings]);
-    IOBluetoothDevice *device = nil;
-    NSString *reason = [self resolveKey:_key peer:&device number:&_number];
-    _peer = device;
-    return reason;
+    return _peer ? nil : unavailable;
 }
 
 - (NSString *)preflight {
@@ -221,7 +222,6 @@ static BluetoothSDPServiceRecordHandle KnownHandle(IOBluetoothSDPServiceRecord *
     NSAssert(NSThread.isMainThread, @"Call on main thread");
     _event = nil;
     _awaitingWrite = NO;
-    _queryDevice = nil;
     if (!_closeRequested && [self ownsChannel:_channel]) {
         _closeRequested = YES;
         [_channel closeChannel];
@@ -231,8 +231,6 @@ static BluetoothSDPServiceRecordHandle KnownHandle(IOBluetoothSDPServiceRecord *
 
 - (void)finish:(NSString *)stage detail:(NSString *)detail {
     ProbeEvent callback = _event;
-    if (_bookHostSetup && !_writeAttempted)
-        detail = [detail stringByAppendingString:@" No setup write was made."];
     [self stop];
     if (callback) callback(stage, detail);
 }
@@ -263,7 +261,7 @@ static BluetoothSDPServiceRecordHandle KnownHandle(IOBluetoothSDPServiceRecord *
     _bookHostSetup = hostSetup;
     NSString *reason = [self resolve];
     if (reason) {
-        event(@"failed", hostSetup ? [reason stringByAppendingString:@" No setup write was made."] : reason);
+        event(@"failed", reason);
         return;
     }
     _event = [event copy];
@@ -290,114 +288,64 @@ static BluetoothSDPServiceRecordHandle KnownHandle(IOBluetoothSDPServiceRecord *
 // has supplied its channel object. Incoming data is intentionally discarded.
 - (void)rfcommChannelData:(IOBluetoothRFCOMMChannel *)channel data:(void *)bytes length:(size_t)length {}
 
-// Separate a lack of class evidence (eligible for one live query) from an
-// incompatible record or channel (terminal). Re-read the pairing, open
-// channel and service records on every pass, including after discovery.
-- (NSString *)verifySetupChannel:(IOBluetoothRFCOMMChannel *)channel incomplete:(NSString **)incomplete {
-    *incomplete = nil;
+// Re-read the selected pairing and the UUID-to-channel mapping at the point
+// of use. The live wrapper and the paired-device list can have separate
+// views of one address. An absent cache supplies no evidence either way.
+- (NSString *)verifySetupChannel:(IOBluetoothRFCOMMChannel *)channel vendorClass:(BOOL *)vendorClass {
+    *vendorClass = NO;
     if (![_key isEqual:SelectedPeerKey([self clientSettings])])
         return @"The selected Galaxy Buds On changed before setup.";
     if (![self ownsChannel:channel] || !channel.isOpen)
         return @"The selected outgoing control channel is no longer open and owned by this check.";
 
     IOBluetoothDevice *live = [channel getDevice];
-    ControlService *opened = [ControlService new];
-    BOOL missing;
-    NSString *reason = FindCachedChannel(live, opened, &missing);
-    if (reason && !missing) return reason;
-    if (missing && ClaimsChannel(live, _number))
-        return @"A different service on the open device claims the selected RFCOMM channel.";
-    if (!missing && opened.number != _number)
-        return @"The live Samsung service now identifies a different RFCOMM channel.";
-
-    NSString *liveIssue = missing ? reason : opened.classIssue;
-    BOOL verified = opened.record && !opened.classIssue;
-    BOOL paired = NO, pairedChannel = NO;
-    BluetoothSDPServiceRecordHandle agreedHandle = KnownHandle(opened.record);
-    for (IOBluetoothDevice *device in [self pairedDevices]) {
+    NSArray *paired = [self pairedDevices];
+    BOOL stillPaired = NO;
+    NSMutableArray *endpoints = [NSMutableArray arrayWithObject:live];
+    for (IOBluetoothDevice *device in paired) {
         if (![_key isEqual:PeerKey(device.addressString)]) continue;
-        paired = YES;
-        ControlService *other = opened;
-        if (device != live) {
-            other = [ControlService new];
-            BOOL aliasMissing;
-            NSString *aliasReason = FindCachedChannel(device, other, &aliasMissing);
-            if (aliasMissing) {
-                if (ClaimsChannel(device, _number))
-                    return @"A paired record assigns the open channel to a different service.";
-                continue;
-            }
-            if (aliasReason) return aliasReason;
-        }
-        if (!other.record) continue;
-        if (other.number != _number)
-            return @"The paired Samsung service identifies a different RFCOMM channel.";
-        pairedChannel = YES;
-        BluetoothSDPServiceRecordHandle handle = KnownHandle(other.record);
-        if (handle && agreedHandle && agreedHandle != handle)
-            return @"Paired records for the open channel have conflicting Samsung service handles.";
-        if (handle) agreedHandle = handle;
-        if (!other.classIssue && SameRecord(opened.record, other.record)) verified = YES;
+        stillPaired = YES;
+        if (device != live) [endpoints addObject:device];
     }
-    if (!paired) return @"The selected Buds are no longer in the paired-device list.";
-    if (!opened.record && !pairedChannel)
-        return @"Neither the open device nor a paired record identifies Samsung’s service on the selected channel.";
-    if (!verified) *incomplete = liveIssue ?: @"The open channel’s Samsung service identity is unconfirmed.";
+    if (!stillPaired) return @"The selected Buds are no longer in the paired-device list.";
+
+    BOOL found = NO;
+    BluetoothSDPServiceRecordHandle agreedHandle = _openingHandle;
+    for (IOBluetoothDevice *device in endpoints) {
+        ControlService *service = [ControlService new];
+        BOOL missing;
+        NSString *reason = FindCachedChannel(device, service, &missing);
+        if (missing) {
+            if (ClaimsChannel(device, _number))
+                return @"A different cached service claims the selected RFCOMM channel.";
+            continue;
+        }
+        if (reason) return reason;
+        if (service.number != _number)
+            return @"The Samsung service identifies a different RFCOMM channel from the open connection.";
+        if (!AgreeOnHandle(&agreedHandle, service.handle))
+            return @"The Samsung service handle on the open connection conflicts with the pairing or opening record.";
+        found = YES;
+        if (service.hasVendorClass) *vendorClass = YES;
+    }
+    if (!found) return @"Neither the open device nor its paired records have a Samsung service UUID mapped to this channel.";
     return nil;
 }
 
-- (void)checkServiceQueryTimeout {
-    if (_queryDevice && _event)
-        [self finish:@"timeout" detail:@"macOS did not finish the service lookup before the deadline."];
-}
-
-- (void)refreshServices:(IOBluetoothRFCOMMChannel *)channel {
-    _queryAttempted = YES;
-    _queryDevice = [channel getDevice];
-    _event(@"discovering", @"Requesting fresh service records for the selected Buds on the open connection.");
-    if (!_event || !_queryDevice) return;
-    if (![self ownsChannel:channel] || !channel.isOpen) {
-        [self finish:@"failed" detail:@"The selected control channel changed before service discovery."];
-        return;
-    }
-    // The unfiltered search requests all attributes of all L2CAP services,
-    // including potential competing records for this RFCOMM channel.
-    IOReturn status = [_queryDevice performSDPQuery:self];
-    if (status != kIOReturnSuccess) {
-        [self finish:@"failed" detail:[NSString stringWithFormat:@"macOS could not start service discovery (0x%08x).", (unsigned)status]];
-        return;
-    }
-    __weak DirectTransport *weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        [weakSelf checkServiceQueryTimeout];
-    });
-}
-
-- (void)sdpQueryComplete:(IOBluetoothDevice *)device status:(IOReturn)status {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (!self->_event || !self->_queryDevice || device != self->_queryDevice) return;
-        self->_queryDevice = nil; // Consume this completion before any listener or transport call.
-        if (status != kIOReturnSuccess) {
-            [self finish:@"failed" detail:[NSString stringWithFormat:@"Service discovery failed (0x%08x).", (unsigned)status]];
-            return;
-        }
-        [self sendBookHostSetup:self->_channel];
-    });
-}
-
 - (void)sendBookHostSetup:(IOBluetoothRFCOMMChannel *)channel {
-    if (!_event || _queryDevice || _writeAttempted) return;
-    NSString *incomplete = nil;
-    NSString *reason = [self verifySetupChannel:channel incomplete:&incomplete];
+    if (!_event || _writeAttempted) return;
+    BOOL vendorClass = NO;
+    NSString *reason = [self verifySetupChannel:channel vendorClass:&vendorClass];
     if (reason) {
         [self finish:@"failed" detail:reason];
         return;
     }
-    if (incomplete) {
-        if (_queryAttempted)
-            [self finish:@"failed" detail:[@"After service discovery: " stringByAppendingString:incomplete]];
-        else
-            [self refreshServices:channel];
+    NSString *detail = [NSString stringWithFormat:@"The paired Buds’ cached Samsung service UUID maps uniquely to RFCOMM channel %u.%@",
+                        (unsigned)_number, vendorClass ? @" The service class also matches." : @""];
+    _event(@"verified", detail);
+    if (!_event || _writeAttempted) return;
+    if (![self ownsChannel:channel] || !channel.isOpen || ![_key isEqual:SelectedPeerKey([self clientSettings])]) {
+        [self finish:@"failed" detail:@"The selected Buds or open control channel changed before the write."];
         return;
     }
     if ([channel getMTU] < sizeof(BookHostSetup)) {
@@ -467,9 +415,7 @@ static BluetoothSDPServiceRecordHandle KnownHandle(IOBluetoothSDPServiceRecord *
             // close (including one triggered by stop). The instance is single-use.
             ProbeEvent callback = self->_event;
             self->_event = nil;
-            if (callback) callback(@"failed", self->_bookHostSetup ?
-                                   @"The channel closed before the Mac confirmed it opened. No setup write was made." :
-                                   @"The channel closed before the Mac confirmed it opened.");
+            if (callback) callback(@"failed", @"The channel closed before the Mac confirmed it opened.");
             return;
         }
         [self releaseChannel];

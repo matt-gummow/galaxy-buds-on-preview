@@ -29,6 +29,7 @@ static NSTextField *label(NSString *text, CGFloat size, NSFontWeight weight) {
 @property (nonatomic) NSTimeInterval openedTime;
 @property (nonatomic) BOOL attempted;
 @property (nonatomic) BOOL opened;
+@property (nonatomic) BOOL controlServiceVerified;
 @property (nonatomic) BOOL ended;
 @property (nonatomic) BOOL reported;
 @property (nonatomic) BOOL hostSetup;
@@ -173,10 +174,9 @@ static NSTextField *label(NSString *text, CGFloat size, NSFontWeight weight) {
 - (void)transportStage:(NSString *)stage detail:(NSString *)detail {
     if (self.ended) return;
     [self addEvent:[NSString stringWithFormat:@"Transport %@. %@", stage, detail ?: @""]];
-    if ([stage isEqualToString:@"discovering"]) {
-        self.status.stringValue = self.hostSetup
-            ? @"Checking the Buds’ Samsung control service. No setup write has been attempted."
-            : @"Checking the Buds’ Samsung control service. Keep listening.";
+    if (self.hostSetup && [stage isEqualToString:@"verified"]) {
+        self.controlServiceVerified = YES;
+        self.status.stringValue = @"Samsung control service verified. No setup write has been attempted.";
     } else if ([stage isEqualToString:@"opened"]) {
         if (self.opened) return;
         self.opened = YES;
@@ -199,7 +199,7 @@ static NSTextField *label(NSString *text, CGFloat size, NSFontWeight weight) {
         self.sent = YES;
         self.ended = YES;
         [self.transport stop];
-        self.status.stringValue = @"The Mac completed the setup write. Earbud acceptance is unverified. With the Mac connected, reconnect the Fold once. Check whether both stay connected, then try Mac music, a Fold call, and music after hang-up. Copy the report and include what you heard.";
+        self.status.stringValue = @"macOS completed the setup write. Earbud acceptance is unverified. With the Mac connected, reconnect the Fold once. Check whether both stay connected, then try Mac music, a Fold call, and music after hang-up. Copy the report and include what you heard.";
     } else if ([stage isEqualToString:@"closed"] || [stage isEqualToString:@"failed"] ||
                [stage isEqualToString:@"timeout"]) {
         self.ended = YES;
@@ -250,15 +250,19 @@ static NSTextField *label(NSString *text, CGFloat size, NSFontWeight weight) {
     if (!self.attempted) result = self.hostSetup
         ? @"No opening attempt was made. No setup write was attempted." : @"No opening attempt was made.";
     else if (self.hostSetup) {
-        if (self.sent) result = @"Mac completed one setup write. Earbud acceptance and audio behavior remain unverified.";
+        if (self.sent) result = @"macOS completed one setup write. Earbud acceptance and audio behavior remain unverified.";
         else if (!self.writeAttempted) result = self.ended
             ? @"No setup write was attempted." : @"No setup write has been attempted.";
         else result = @"Setup write completion unconfirmed.";
     } else result = self.reported ? @"Listener observation recorded." : @"Listener observation pending.";
     NSString *start = self.startDate ? [[NSISO8601DateFormatter new] stringFromDate:self.startDate] : @"Unknown";
-    return [NSString stringWithFormat:@"Buds On Connection Check %@\nMode: %@\nStarted: %@\nChannel opened: %@\n%@\n%@",
+    NSString *verification = self.hostSetup
+        ? [NSString stringWithFormat:@"Samsung control service verified: %@\n",
+           self.controlServiceVerified ? @"yes" : @"unconfirmed"] : @"";
+    return [NSString stringWithFormat:@"Buds On Connection Check %@\nMode: %@\nStarted: %@\nChannel opened: %@\n%@%@\n%@",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"],
-            self.hostSetup ? @"Mac host setup" : @"Fold playback", start, self.opened ? @"yes" : @"unconfirmed", body, result];
+            self.hostSetup ? @"Mac host setup" : @"Fold playback", start, self.opened ? @"yes" : @"unconfirmed",
+            verification, body, result];
 }
 
 - (void)copyReport:(id)sender {

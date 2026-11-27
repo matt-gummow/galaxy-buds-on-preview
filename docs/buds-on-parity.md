@@ -39,6 +39,10 @@ Battery, standard EQ, media/call touch controls and experimental gaming/pause pa
 
 The 1.2 Mac host setup run on November 27 opened the outgoing channel, then stopped before it attempted the write. The same 1.2 error covered missing service-class evidence on the open device and a changed RFCOMM channel number. The report cannot distinguish those cases. Version 1.3 checks equivalent cached entries for the same service record, can request fresh service information on the open device, and reports the reason when verification stops setup.
 
+The 1.3 hardware run opened the outgoing channel and timed out waiting for the full service lookup. It made no setup write. Version 1.4 uses the cached service lookup pattern used by the upstream Mac transport. It requires the exact Samsung UUID, one matching service and a unique channel assignment consistent with the outgoing connection. An explicit conflicting class, a changed channel or an ambiguous mapping stops setup. An entry without readable class information can still supply a usable UUID-to-channel mapping. The report identifies the basis for proceeding. [Upstream macOS service lookup](https://github.com/timschneeb/GalaxyBudsClient/blob/85dfc8bb39fc45d3c30ecf71ab2c663fb1d41729/GalaxyBudsClient.Platform.OSX/Native/src/Bluetooth.mm#L78-L116)
+
+The host setup test closes its own control channel after the local write completes. The Fold playback check tests what happens after that channel closes.
+
 References:
 - [Upstream MDE implementation and hardware discussion](https://github.com/timschneeb/GalaxyBudsClient/pull/729)
 - [Buds4 Pro feature profile at the pinned upstream revision](https://github.com/timschneeb/GalaxyBudsClient/blob/85dfc8bb39fc45d3c30ecf71ab2c663fb1d41729/GalaxyBudsClient/Model/Specifications/Buds4ProDeviceSpec.cs)

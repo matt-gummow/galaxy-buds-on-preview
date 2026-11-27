@@ -88,12 +88,16 @@ static void TestHostSetup(void) {
     [host start:nil];
     assert(host.attempted && setupAttempts == 1 && !listenAttempts);
     assert(!host.mode.enabled && !host.startButton.enabled);
-    [host transportStage:@"discovering" detail:@"Refreshing the selected service"];
-    assert(!host.ended && !host.opened && !host.writeAttempted);
-    assert([host.status.stringValue containsString:@"Checking the Buds"]);
+    assert(!host.ended && !host.opened && !host.controlServiceVerified && !host.writeAttempted);
+    assert([[host reportText] containsString:@"Samsung control service verified: unconfirmed"]);
     assert([[host reportText] containsString:@"No setup write has been attempted"]);
     [host transportStage:@"opened" detail:@"Opened"];
     assert(!host.listeningTimer && !host.stopped.enabled && !host.continued.enabled);
+    assert(!host.controlServiceVerified && !host.writeAttempted);
+    [host transportStage:@"verified" detail:@"The selected cached Samsung service matches the opened RFCOMM channel"];
+    assert(host.controlServiceVerified && !host.writeAttempted && !host.sent && !host.ended);
+    assert([host.status.stringValue containsString:@"Samsung control service verified"]);
+    assert([[host reportText] containsString:@"Samsung control service verified: yes"]);
     assert([[host reportText] containsString:@"No setup write has been attempted"]);
     [host transportStage:@"writing" detail:@"Local write attempted"];
     assert(host.writeAttempted && !host.sent && !host.ended);
@@ -102,7 +106,8 @@ static void TestHostSetup(void) {
     assert(!host.reported && !host.ended);
     [host transportStage:@"sent" detail:@"Local write completed"];
     assert(host.ended && host.sent && !host.reported);
-    assert([[host reportText] containsString:@"Mac completed one setup write"]);
+    assert([[host reportText] containsString:@"macOS completed one setup write"]);
+    assert([host.status.stringValue containsString:@"macOS completed the setup write"]);
     assert([[host reportText] containsString:@"Earbud acceptance and audio behavior remain unverified"]);
     assert([host.status.stringValue containsString:@"Earbud acceptance is unverified"]);
     assert(![[host reportText] containsString:@"Listener observation"]);
@@ -113,6 +118,7 @@ static void TestHostSetup(void) {
         TestController *interrupted = mock();
         interrupted.hostSetup = YES;
         [interrupted transportStage:@"opened" detail:@"Opened"];
+        [interrupted transportStage:@"verified" detail:@"Selected Samsung service verified"];
         [interrupted transportStage:@"writing" detail:@"Local write attempted"];
         [interrupted transportStage:stage detail:@"Write did not complete"];
         [interrupted transportStage:@"sent" detail:@"Late callback"];
@@ -120,17 +126,20 @@ static void TestHostSetup(void) {
         assert([[interrupted reportText] containsString:@"Setup write completion unconfirmed"]);
         assert(![[interrupted reportText] containsString:@"No setup write was attempted"]);
     }
-    // Discovery, channel opening and a valid target are prerequisites, not writes.
-    for (NSString *progress in @[@"discovering", @"opened"]) {
+    // Opening and verifying the selected service are prerequisites, not writes.
+    for (NSString *progress in @[@"opening", @"opened", @"verified"]) {
         for (NSString *stage in @[@"failed", @"closed", @"timeout"]) {
             TestController *unwritten = mock();
             unwritten.hostSetup = YES;
-            [unwritten transportStage:progress detail:@"Still checking the target"];
+            if ([progress isEqualToString:@"verified"])
+                [unwritten transportStage:@"opened" detail:@"Opened"];
+            [unwritten transportStage:progress detail:@"Selected service check"];
             [unwritten transportStage:stage detail:@"Target could not be verified"];
             [unwritten transportStage:@"writing" detail:@"Late attempt callback"];
             [unwritten transportStage:@"sent" detail:@"Late completion callback"];
             assert(unwritten.ended && !unwritten.sent && !unwritten.writeAttempted);
             assert([unwritten.status.stringValue containsString:@"No setup write was attempted"]);
+            assert([unwritten.status.stringValue componentsSeparatedByString:@"No setup write was attempted"].count == 2);
             assert([[unwritten reportText] containsString:@"No setup write was attempted"]);
             assert(![[unwritten reportText] containsString:@"completion unconfirmed"]);
             assert(![[unwritten reportText] containsString:@"Late"]);
@@ -139,14 +148,22 @@ static void TestHostSetup(void) {
     TestController *closed = mock();
     closed.hostSetup = YES;
     [closed transportStage:@"opened" detail:@"Opened"];
+    [closed transportStage:@"verified" detail:@"Selected Samsung service verified"];
     [closed windowWillClose:[NSNotification notificationWithName:NSWindowWillCloseNotification object:nil]];
     [closed transportStage:@"sent" detail:@"Late callback"];
     assert(closed.ended && !closed.sent && ![[closed reportText] containsString:@"Late callback"]);
     assert([[closed reportText] containsString:@"No setup write was attempted"]);
+    assert([[closed reportText] containsString:@"Samsung control service verified: yes"]);
+    TestController *unverified = mock();
+    unverified.hostSetup = YES;
+    [unverified transportStage:@"failed" detail:@"Selected service did not match"];
+    [unverified transportStage:@"verified" detail:@"Late verification"];
+    assert(!unverified.controlServiceVerified && ![[unverified reportText] containsString:@"Late verification"]);
     TestController *listen = mock();
     listen.attempted = NO;
     [listen start:nil];
     assert(listen.attempted && listenAttempts == 1 && setupAttempts == 1);
+    assert(![[listen reportText] containsString:@"Samsung control service verified:"]);
 }
 
 int main(void) { @autoreleasepool {
@@ -158,10 +175,11 @@ int main(void) { @autoreleasepool {
     assert(pre.ended && pre.reported && !pre.opened && !pre.stopped.enabled);
     assert([pre.status.stringValue containsString:@"unconfirmed"]);
     ProbeController *ok = mock();
-    [ok transportStage:@"discovering" detail:@"Refreshing the selected service"];
+    [ok transportStage:@"opening" detail:@"Opening the selected service"];
     assert(!ok.ended && !ok.opened && !ok.continued.enabled && ok.stopped.enabled);
     [ok transportStage:@"opened" detail:@"opened"];
     assert(ok.opened && !ok.continued.enabled);
+    assert(![[ok reportText] containsString:@"Samsung control service verified:"]);
     ok.openedTime -= 4;
     [ok tick];
     assert(ok.continued.enabled);
