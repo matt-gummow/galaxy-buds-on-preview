@@ -15,6 +15,12 @@ The preview's failed ordinary Mac reconnection is not a test of the Buds4 Pro mu
 
 These are application restrictions introduced during protocol validation. They do not prove a hardware restriction. Enabling the Pro flags wholesale would activate command encoders that have not been checked for SM-U600.
 
+## Manager UI parity
+
+Reuse the Manager’s Buds4 Pro controls for features shared with Buds On. Keep their labels, layout, and interactions aligned wherever the behavior matches. Use the selected model’s capabilities to determine which controls appear and which device commands they use.
+
+For Buds On-specific features, place the controls alongside related settings using the Manager’s existing components and interaction patterns.
+
 ## Samsung protocol distinctions
 
 Saved Samsung application disassembly distinguishes three paths:
