@@ -8,21 +8,21 @@ The [hardware-checked Apple Silicon build](https://github.com/matt-gummow/galaxy
 
 The workflow checks out upstream commit `85dfc8bb39fc45d3c30ecf71ab2c663fb1d41729`, applies `add_buds_on.py`, and builds the native Bluetooth library and app with the pinned cloud toolchain.
 
-## Experimental Mac audio handoff
+## Mac–Fold handoff preview
 
-A saved SM-U600 Galaxy Book capture shows the Book sending one computer audio handoff request on the Samsung SMEP service, 2.216 seconds after reconnecting. The frame matched the clear-flag `0x71` layout and passed its checksum. The recording does not reveal whether the Buds accepted it or whether the Fold stayed connected. Earlier settings and version messages have unverified fields on this model.
+Preview 3 (5.2.1.3) brings the Buds On Connection Check 1.5 host setup into Galaxy Buds Manager. It sends the same Galaxy Book setup message once and holds a separate Samsung control channel during the handoff. [Preview builds](https://github.com/matt-gummow/galaxy-buds-on-preview/actions/workflows/build-buds-on-macos.yml)
 
-On the experimental branch, **Settings → Experimental audio handoff** can open the SMEP control channel to the currently connected Buds. Start with music playing from the Fold. If connecting the Mac already interrupts it, stop there. If the Fold keeps playing, choose **Prepare handoff test**. If it stops during preparation, record that result in the panel. If it keeps playing, confirm you can still hear the Fold and choose **Request Mac audio once**. Report what you hear, including whether a short sound from the Mac plays through the Buds. The connection report records the test stages and the Mac's default output when available. Application-specific output routing can differ.
+Connect the selected Buds On to the Mac and confirm that Mac audio plays through them. In **Settings → Experimental Mac audio handoff**, select **Send setup once**. Reconnect the Fold once, then take a Fold call while Mac audio is playing. After hanging up, press Play on the Mac if the player stayed paused. The standalone check confirmed that the call switched automatically and Mac playback returned when restarted, without a manual Bluetooth reconnect. Use **End handoff session** to release the control channel.
 
-The experiment sends only the observed audio request, after explicit confirmation, and closes its temporary channel. Read-only diagnostics disables it. Firmware operations and the Book's unverified settings and version writes remain blocked.
+For the Manager hardware check, also confirm the Equalizer and Touchpad pages work while handoff is active. Repeat the call after a charging-case cycle and after Mac sleep to check how the two connections recover. The connection report is available in Settings.
 
 ## Using the app
 
 | Page | Buds On support |
 | --- | --- |
-| **Home** | Left earbud, right earbud, and case battery from validated device status. The app groups matching earbud percentages and uses the macOS headset battery when available while waiting for device status. |
-| **Touchpad** | Media controls, Answer call or end call, and Decline call. These commands were confirmed on SM-U600 in the preceding hardware previews. Left and right volume hold are available for experimental testing when both hold actions are known. |
-| **Equalizer** | Six standard presets from Balanced through Treble boost. Preset writes passed a hardware test in the previous preview. A Custom curve can be read from the device when it returns a supported reply. Custom curve editing remains disabled. |
+| **Home** | Manager battery indicators for each earbud and the case, populated from validated device status. The macOS headset battery is shown when individual levels are unavailable. |
+| **Touchpad** | Manager switches for media controls, answering or ending calls, and declining calls. These commands were confirmed on SM-U600 in the preceding hardware previews. Left and right volume hold are available for experimental testing when both hold actions are known. |
+| **Equalizer** | The shared Manager preset selector shows six standard presets from Balanced through Treble boost. Preset writes passed a hardware test in the previous preview. A Custom curve can be read from the device when it returns a supported reply. |
 | **Settings** | Experimental Gaming mode and Pause when one earbud is removed, a reversible read-only mode for the running app, and the connection report. |
 
 Pair the earbuds in macOS Bluetooth first and connect in GalaxyBudsClient. Changes are explicit actions on the selected device. The app checks recent status before sending a change. A matching EQ reply updates the preset without reconnecting. If the earbuds only acknowledge a touch command, select **Refresh status** to check the result. Last reported values stay visible during a management reconnect, and they do not authorize writes. The app sends each setting command once.
@@ -33,7 +33,7 @@ Volume hold changes only the selected earbud and preserves the other side. This 
 
 Open **Settings → Copy Buds On connection report** after connecting or attempting a connection. The same report is saved to `~/Library/Application Support/GalaxyBudsClient/buds-on-connection-report.txt`. It omits Bluetooth addresses and packet dumps.
 
-The report summarizes complete 8-byte `0x76` multipoint notices. It includes the firmware’s support flag, connection state, audio focus, and known streaming profiles. The final three unverified payload bytes are omitted. An earlier SM-U600 report showed the firmware support flag and a multiple-device state. The subsequent simultaneous Galaxy phone and Mac connection attempt failed. That report showed a one-device state with the support flag still set. The current preview supports using one of those audio hosts at a time. Samsung documents Auto Switch for compatible Galaxy devices and Windows PCs running Galaxy Connect. [Samsung Galaxy Buds On](https://www.samsung.com/us/audio-sound/galaxy-buds-on/)
+The report summarizes complete 8-byte `0x76` multipoint notices. It includes the firmware’s support flag, connection state, audio focus, and known streaming profiles. The final three unverified payload bytes are omitted. An earlier SM-U600 report showed the firmware support flag and a multiple-device state. The subsequent simultaneous Galaxy phone and Mac connection attempt failed. That report showed a one-device state with the support flag still set. The standalone 1.5 test later confirmed audible call handoff with the Samsung control channel held open. [Mac and Fold test results](docs/buds-on-parity.md#evidence-and-remaining-work)
 
 In a Galaxy Book and Galaxy phone test, the listener heard audio switch to the phone and back. During the same recording, the Book requested a disconnect of its classic Bluetooth link to the Buds and reconnected 4.82 seconds after the controller reported the disconnect. The recording covers only the Book and contains no call markers. Whether the phone and Book held simultaneous audio connections during the call is still unknown.
 

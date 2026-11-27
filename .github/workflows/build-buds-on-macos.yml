@@ -6,7 +6,7 @@ on:
     paths:
       - '.github/workflows/build-buds-on-macos.yml'
       - 'add_buds_on.py'
-      - 'patches/buds-on-mac-handoff.patch'
+      - 'patches/**'
       - 'tests/**'
       - 'scripts/**'
   workflow_dispatch:
@@ -61,12 +61,15 @@ jobs:
         shell: bash
         run: python3 add_buds_on.py GalaxyBudsClient-source
 
-      - name: Apply and test the handoff experiment
+      - name: Apply and test the Manager preview
         shell: bash
         working-directory: GalaxyBudsClient-source
         run: |
           git apply --check "$GITHUB_WORKSPACE/patches/buds-on-mac-handoff.patch"
           git apply "$GITHUB_WORKSPACE/patches/buds-on-mac-handoff.patch"
+          git apply "$GITHUB_WORKSPACE/patches/buds-on-host-setup.patch"
+          git apply "$GITHUB_WORKSPACE/patches/buds-on-shared-controls.patch"
+          git apply "$GITHUB_WORKSPACE/patches/buds-on-battery-display.patch"
           python3 "$GITHUB_WORKSPACE/scripts/stamp_preview.py" "$PWD"
           bash "$GITHUB_WORKSPACE/tests/run-handoff-tests.sh" "$PWD"
 
@@ -145,11 +148,11 @@ jobs:
           test -n "$library"
           lipo -verify_arch arm64 "$library"
           nm -gU "$library" > "$RUNNER_TEMP/buds-exports.txt"
-          for suffix in prepare request close; do
+          for suffix in prepare request close is_open; do
             grep -Eq "[[:space:]]_bt_budson_handoff_${suffix}$" "$RUNNER_TEMP/buds-exports.txt"
           done
           mkdir -p installer
-          cp "${packages[0]}" installer/GalaxyBudsOn-Handoff-Preview-macOS-arm64.pkg
+          cp "${packages[0]}" installer/GalaxyBudsOn-Handoff-Preview-3-macOS-arm64.pkg
           shasum -a 256 installer/*.pkg
 
       - name: Upload macOS installer

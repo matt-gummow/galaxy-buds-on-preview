@@ -1,0 +1,354 @@
+diff --git a/GalaxyBudsClient/Interface/Controls/EarbudStatusUnit.axaml b/GalaxyBudsClient/Interface/Controls/EarbudStatusUnit.axaml
+index e5fde0b..82f7faa 100644
+--- a/GalaxyBudsClient/Interface/Controls/EarbudStatusUnit.axaml
++++ b/GalaxyBudsClient/Interface/Controls/EarbudStatusUnit.axaml
+@@ -68,27 +68,30 @@
+                 </Interaction.Behaviors>
+             </TextBlock>
+ 
+-            <TextBlock HorizontalAlignment="Right"
+-                       FontSize="{StaticResource FontSizeOtherLabels}"
+-                       PointerPressed="OnTemperaturePointerPressed">
+-                <TextBlock.Text>
+-                    <MultiBinding StringFormat="{}{0:f2}°{1}">
+-                        <Binding Path="LeftTemperature" />
+-                        <Binding Path="TemperatureUnit"
+-                                 Source="{x:Static config:Settings.Data}"
+-                                 Converter="{StaticResource EnumDescriptionConverter}" />
+-                    </MultiBinding>
+-                </TextBlock.Text>
+-            </TextBlock>
+-
+-            <TextBlock Text="{Binding LeftWearState, Converter={StaticResource EnumDescriptionConverter}}"
+-                       HorizontalAlignment="Right"
+-                       FontSize="{StaticResource FontSizeOtherLabels}">
+-                <Interaction.Behaviors>
+-                    <!-- If current data is unsupported (all models except 1st-gen) then we have enough space for placement states  -->
+-                    <ext:RequiresFeatureBehavior Not="True" Feature="Current" />
+-                </Interaction.Behaviors>
+-            </TextBlock>
++            <StackPanel IsVisible="{Binding !IsBudsOn}"
++                        Spacing="{StaticResource StatusUnitTextSpacing}">
++                <TextBlock HorizontalAlignment="Right"
++                           FontSize="{StaticResource FontSizeOtherLabels}"
++                           PointerPressed="OnTemperaturePointerPressed">
++                    <TextBlock.Text>
++                        <MultiBinding StringFormat="{}{0:f2}°{1}">
++                            <Binding Path="LeftTemperature" />
++                            <Binding Path="TemperatureUnit"
++                                     Source="{x:Static config:Settings.Data}"
++                                     Converter="{StaticResource EnumDescriptionConverter}" />
++                        </MultiBinding>
++                    </TextBlock.Text>
++                </TextBlock>
++
++                <TextBlock Text="{Binding LeftWearState, Converter={StaticResource EnumDescriptionConverter}}"
++                           HorizontalAlignment="Right"
++                           FontSize="{StaticResource FontSizeOtherLabels}">
++                    <Interaction.Behaviors>
++                        <!-- If current data is unsupported (all models except 1st-gen) then we have enough space for placement states  -->
++                        <ext:RequiresFeatureBehavior Not="True" Feature="Current" />
++                    </Interaction.Behaviors>
++                </TextBlock>
++            </StackPanel>
+         </StackPanel>
+ 
+         <StackPanel Grid.Column="2"
+@@ -100,10 +103,6 @@
+             <controls:EarbudIconUnit />
+ 
+             <StackPanel Margin="0,-10,0,0">
+-                <Interaction.Behaviors>
+-                    <ext:RequiresFeatureBehavior Feature="CaseBattery" />
+-                </Interaction.Behaviors>
+-
+                 <TextBlock Text="{ext:Translate {x:Static i18N:Keys.Case}}"
+                            TextAlignment="Center"
+                            Opacity="0.5"
+@@ -153,27 +152,30 @@
+                 </Interaction.Behaviors>
+             </TextBlock>
+ 
+-            <TextBlock HorizontalAlignment="Left"
+-                       FontSize="{StaticResource FontSizeOtherLabels}"
+-                       PointerPressed="OnTemperaturePointerPressed">
+-                <TextBlock.Text>
+-                    <MultiBinding StringFormat="{}{0:f2}°{1}">
+-                        <Binding Path="RightTemperature" />
+-                        <Binding Path="TemperatureUnit"
+-                                 Source="{x:Static config:Settings.Data}"
+-                                 Converter="{StaticResource EnumDescriptionConverter}" />
+-                    </MultiBinding>
+-                </TextBlock.Text>
+-            </TextBlock>
+-
+-            <TextBlock Text="{Binding RightWearState, Converter={StaticResource EnumDescriptionConverter}}"
+-                       HorizontalAlignment="Left"
+-                       FontSize="{StaticResource FontSizeOtherLabels}">
+-                <Interaction.Behaviors>
+-                    <!-- If current data is unsupported (all models except 1st-gen) then we have enough space for placement states  -->
+-                    <ext:RequiresFeatureBehavior Not="True" Feature="Current" />
+-                </Interaction.Behaviors>
+-            </TextBlock>
++            <StackPanel IsVisible="{Binding !IsBudsOn}"
++                        Spacing="{StaticResource StatusUnitTextSpacing}">
++                <TextBlock HorizontalAlignment="Left"
++                           FontSize="{StaticResource FontSizeOtherLabels}"
++                           PointerPressed="OnTemperaturePointerPressed">
++                    <TextBlock.Text>
++                        <MultiBinding StringFormat="{}{0:f2}°{1}">
++                            <Binding Path="RightTemperature" />
++                            <Binding Path="TemperatureUnit"
++                                     Source="{x:Static config:Settings.Data}"
++                                     Converter="{StaticResource EnumDescriptionConverter}" />
++                        </MultiBinding>
++                    </TextBlock.Text>
++                </TextBlock>
++
++                <TextBlock Text="{Binding RightWearState, Converter={StaticResource EnumDescriptionConverter}}"
++                           HorizontalAlignment="Left"
++                           FontSize="{StaticResource FontSizeOtherLabels}">
++                    <Interaction.Behaviors>
++                        <!-- If current data is unsupported (all models except 1st-gen) then we have enough space for placement states  -->
++                        <ext:RequiresFeatureBehavior Not="True" Feature="Current" />
++                    </Interaction.Behaviors>
++                </TextBlock>
++            </StackPanel>
+         </StackPanel>
+     </Grid>
+ 
+diff --git a/GalaxyBudsClient/Interface/Controls/EarbudStatusUnit.axaml.cs b/GalaxyBudsClient/Interface/Controls/EarbudStatusUnit.axaml.cs
+index 57f93ce..f79dd7a 100644
+--- a/GalaxyBudsClient/Interface/Controls/EarbudStatusUnit.axaml.cs
++++ b/GalaxyBudsClient/Interface/Controls/EarbudStatusUnit.axaml.cs
+@@ -1,4 +1,4 @@
+-using System;
++using Avalonia;
+ using Avalonia.Controls;
+ using Avalonia.Input;
+ using Avalonia.Threading;
+@@ -10,10 +10,28 @@ namespace GalaxyBudsClient.Interface.Controls;
+ 
+ public partial class EarbudStatusUnit : Panel
+ {
++    public static readonly StyledProperty<BudsOnBatteryLevels?> BudsOnBatteryProperty =
++        AvaloniaProperty.Register<EarbudStatusUnit, BudsOnBatteryLevels?>(nameof(BudsOnBattery));
++
++    public BudsOnBatteryLevels? BudsOnBattery
++    {
++        get => GetValue(BudsOnBatteryProperty);
++        set => SetValue(BudsOnBatteryProperty, value);
++    }
++
+     public EarbudStatusUnit()
+     {
+         InitializeComponent();
+-        DataContext = new EarbudStatusUnitViewModel();
++        var viewModel = new EarbudStatusUnitViewModel();
++        DataContext = viewModel;
++        viewModel.UpdateBudsOnBattery(BudsOnBattery);
++    }
++
++    protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
++    {
++        base.OnPropertyChanged(change);
++        if (change.Property == BudsOnBatteryProperty && DataContext is EarbudStatusUnitViewModel viewModel)
++            viewModel.UpdateBudsOnBattery(BudsOnBattery);
+     }
+ 
+     private void OnTemperaturePointerPressed(object? sender, PointerPressedEventArgs e)
+diff --git a/GalaxyBudsClient/Interface/Pages/HomePage.axaml b/GalaxyBudsClient/Interface/Pages/HomePage.axaml
+index 607aa9f..d5a0c7f 100644
+--- a/GalaxyBudsClient/Interface/Pages/HomePage.axaml
++++ b/GalaxyBudsClient/Interface/Pages/HomePage.axaml
+@@ -9,6 +9,7 @@
+              xmlns:ext="clr-namespace:GalaxyBudsClient.Interface.MarkupExtensions"
+              mc:Ignorable="d" d:DesignWidth="800"
+              x:Class="GalaxyBudsClient.Interface.Pages.HomePage"
++             x:Name="HomeRoot"
+              x:DataType="pages:HomePageViewModel"
+              x:CompileBindings="True">
+ 
+@@ -21,7 +22,8 @@
+             <controls:SettingsGroup>
+                 <ui:FASettingsExpanderItem>
+                     <StackPanel>
+-                        <controls:EarbudStatusUnit Margin="0, 30" />
++                        <controls:EarbudStatusUnit Margin="0, 30"
++                                                   BudsOnBattery="{ReflectionBinding #HomeRoot.DataContext.BudsOnBattery}" />
+                         <TextBlock Text="{Binding BudsOnBatteryText}"
+                                    IsVisible="{Binding HasBudsOnBattery}"
+                                    HorizontalAlignment="Center"
+diff --git a/GalaxyBudsClient/Interface/ViewModels/Controls/EarbudStatusUnitViewModel.cs b/GalaxyBudsClient/Interface/ViewModels/Controls/EarbudStatusUnitViewModel.cs
+index 926b172..0a518f4 100644
+--- a/GalaxyBudsClient/Interface/ViewModels/Controls/EarbudStatusUnitViewModel.cs
++++ b/GalaxyBudsClient/Interface/ViewModels/Controls/EarbudStatusUnitViewModel.cs
+@@ -5,13 +5,17 @@ using GalaxyBudsClient.Message;
+ using GalaxyBudsClient.Message.Decoder;
+ using GalaxyBudsClient.Model.Config;
+ using GalaxyBudsClient.Model.Constants;
++using GalaxyBudsClient.Model.Specifications;
+ using GalaxyBudsClient.Platform;
+ using GalaxyBudsClient.Utils.Interface;
+ 
+ namespace GalaxyBudsClient.Interface.ViewModels.Controls;
+ 
++public sealed record BudsOnBatteryLevels(int? Left, int? Right, int? Case);
++
+ public partial class EarbudStatusUnitViewModel : ViewModelBase
+ {
++    [Reactive] private bool _isBudsOn;
+     [Reactive] private bool _isLeftOnline;
+     [Reactive] private bool _isRightOnline;
+     [Reactive] private int _leftBattery;
+@@ -35,7 +39,24 @@ public partial class EarbudStatusUnitViewModel : ViewModelBase
+         Loc.LanguageUpdated += LoadFromCache;
+         LoadFromCache();
+         
+-        _ = BluetoothImpl.Instance.SendRequestAsync(MsgIds.DEBUG_GET_ALL_DATA);
++        if (BluetoothImpl.Instance.CurrentModel != Models.BudsOn)
++            _ = BluetoothImpl.Instance.SendRequestAsync(MsgIds.DEBUG_GET_ALL_DATA);
++    }
++
++    internal void UpdateBudsOnBattery(BudsOnBatteryLevels? battery)
++    {
++        var wasBudsOn = IsBudsOn;
++        IsBudsOn = battery is not null || BluetoothImpl.Instance.CurrentModel == Models.BudsOn;
++        if (!IsBudsOn && !wasBudsOn)
++            return;
++
++        LeftBattery = battery?.Left ?? 0;
++        RightBattery = battery?.Right ?? 0;
++        CaseBattery = battery?.Case;
++        IsLeftOnline = battery?.Left is not null;
++        IsRightOnline = battery?.Right is not null;
++        if (!IsBudsOn)
++            LoadFromCache();
+     }
+ 
+     private void OnBluetoothPropertyChanged(object? sender, PropertyChangedEventArgs e)
+@@ -60,6 +81,9 @@ public partial class EarbudStatusUnitViewModel : ViewModelBase
+     
+     private void LoadFromCache()
+     {
++        if (BluetoothImpl.Instance.CurrentModel == Models.BudsOn)
++            return;
++
+         if (DeviceMessageCache.Instance.BasicStatusUpdate != null)
+             OnStatusUpdated(null, DeviceMessageCache.Instance.BasicStatusUpdate);
+         if (DeviceMessageCache.Instance.DebugGetAllData != null)
+@@ -72,10 +96,15 @@ public partial class EarbudStatusUnitViewModel : ViewModelBase
+     {
+         Dispatcher.UIThread.Post(() =>
+         {
+-            var connected = BluetoothImpl.Instance.IsConnected;
++            var bluetooth = BluetoothImpl.Instance;
++            if (bluetooth.CurrentModel == Models.BudsOn)
++                return;
++
++            var connected = bluetooth.IsConnected;
+             LeftBattery = e.BatteryL;
+             RightBattery = e.BatteryR;
+-            CaseBattery = e.BatteryCase is <= 0 or > 100 ? null : e.BatteryCase;
++            CaseBattery = bluetooth.DeviceSpec.Supports(Features.CaseBattery) &&
++                          e.BatteryCase is > 0 and <= 100 ? e.BatteryCase : null;
+             LeftWearState = e.PlacementL;
+             RightWearState = e.PlacementR;
+             IsLeftOnline = connected && e.BatteryL > 0 && e.PlacementL != PlacementStates.Disconnected;
+@@ -87,6 +116,9 @@ public partial class EarbudStatusUnitViewModel : ViewModelBase
+     {
+         Dispatcher.UIThread.Post(() =>
+         {
++            if (BluetoothImpl.Instance.CurrentModel == Models.BudsOn)
++                return;
++
+             // Buds2 Pro seem to send 0 for all values sometimes. Ignore those updates.
+             if(e is { LeftThermistor: <= 0, RightThermistor: <= 0 })
+                 return;
+diff --git a/GalaxyBudsClient/Interface/ViewModels/Pages/HomePageViewModel.cs b/GalaxyBudsClient/Interface/ViewModels/Pages/HomePageViewModel.cs
+index bbc9ed7..194c09d 100644
+--- a/GalaxyBudsClient/Interface/ViewModels/Pages/HomePageViewModel.cs
++++ b/GalaxyBudsClient/Interface/ViewModels/Pages/HomePageViewModel.cs
+@@ -6,6 +6,7 @@ using Avalonia.Threading;
+ using FluentIcons.Common;
+ using GalaxyBudsClient.Generated.I18N;
+ using GalaxyBudsClient.Interface.Pages;
++using GalaxyBudsClient.Interface.ViewModels.Controls;
+ using GalaxyBudsClient.Message;
+ using GalaxyBudsClient.Message.Decoder;
+ using GalaxyBudsClient.Platform;
+@@ -26,6 +27,13 @@ public class HomePageViewModel : MainPageViewModelBase
+     private readonly DispatcherTimer _refreshTimer = new();
+     private bool _readingBudsOnBattery;
+     private string? _budsOnBatteryText;
++    private BudsOnBatteryLevels? _budsOnBattery;
++
++    public BudsOnBatteryLevels? BudsOnBattery
++    {
++        get => _budsOnBattery;
++        private set => this.RaiseAndSetIfChanged(ref _budsOnBattery, value);
++    }
+ 
+     public bool HasBudsOnBattery => _budsOnBatteryText != null;
+ 
+@@ -75,6 +83,9 @@ public class HomePageViewModel : MainPageViewModelBase
+     private void ClearBudsOnBatteryText() =>
+         Dispatcher.UIThread.Post(() =>
+         {
++            BudsOnBattery = BluetoothImpl.Instance.CurrentModel == Models.BudsOn
++                ? new(null, null, null)
++                : null;
+             BudsOnBatteryText = null;
+             BudsOnDiagnostics.SetMacBattery(null);
+         });
+@@ -88,23 +99,8 @@ public class HomePageViewModel : MainPageViewModelBase
+         if (left == null && right == null && caseBattery == null)
+             return false;
+ 
+-        var levels = new System.Collections.Generic.List<string>(3);
+-        if (left is int level && left == right)
+-        {
+-            levels.Add($"Earbuds {level}%");
+-        }
+-        else
+-        {
+-            if (left is int leftLevel)
+-                levels.Add($"Left {leftLevel}%");
+-            if (right is int rightLevel)
+-                levels.Add($"Right {rightLevel}%");
+-        }
+-        if (caseBattery is int caseLevel)
+-            levels.Add($"Case {caseLevel}%");
+-
+-        var summary = string.Join(" · ", levels);
+-        BudsOnBatteryText = BudsOnDiagnostics.HasLiveBudsOnStatus(device) ? summary : $"{summary} (last reported)";
++        BudsOnBattery = new(left, right, caseBattery);
++        BudsOnBatteryText = BudsOnDiagnostics.HasLiveBudsOnStatus(device) ? null : "Battery last reported by earbuds";
+         return true;
+     }
+ 
+@@ -112,8 +108,11 @@ public class HomePageViewModel : MainPageViewModelBase
+     {
+         var bluetooth = BluetoothImpl.Instance;
+         var device = bluetooth.Device.Current;
+-        if (!PlatformUtils.IsOSX || device?.Model != Models.BudsOn ||
+-            ShowBudsOnFrameBattery(bluetooth, device) || _readingBudsOnBattery ||
++        if (device?.Model != Models.BudsOn)
++            return;
++
++        BudsOnBattery ??= new(null, null, null);
++        if (!PlatformUtils.IsOSX || ShowBudsOnFrameBattery(bluetooth, device) || _readingBudsOnBattery ||
+             string.IsNullOrWhiteSpace(device.Name))
+             return;
+ 
+@@ -127,7 +126,10 @@ public class HomePageViewModel : MainPageViewModelBase
+ 
+             BudsOnDiagnostics.SetMacBattery(battery);
+             if (!ShowBudsOnFrameBattery(bluetooth, device))
++            {
++                BudsOnBattery = new(null, null, null);
+                 BudsOnBatteryText = battery is int percentage ? $"Battery {percentage}% (macOS)" : null;
++            }
+         }
+         finally
+         {

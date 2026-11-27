@@ -11,7 +11,7 @@ The preview's failed ordinary Mac reconnection is not a test of the Buds4 Pro mu
 | MDE patch execution | Writes version-only property and checks reply | Additional explicit BudsOn early return |
 | Alternative Samsung channel | General SMEP sender | General sender blocked; separate opt-in handoff transport |
 | Status and settings | Generic model-specific implementation | Dedicated guarded decoder and settings commands |
-| Handoff preview 2 | Not applicable | Requires the management connection first |
+| Handoff preview 3 | Uses the upstream multipoint patch | Starts from the verified management connection and holds a separate Samsung control channel |
 
 These are application restrictions introduced during protocol validation. They do not prove a hardware restriction. Enabling the Pro flags wholesale would activate command encoders that have not been checked for SM-U600.
 

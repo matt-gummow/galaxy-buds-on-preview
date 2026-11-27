@@ -12,20 +12,28 @@ static void expect(bool condition, const char *description) {
 }
 
 int main() {
-    // Independent reference used by the offline Galaxy Book trace classifier.
-    // CRC-16/XMODEM of the three body bytes is 0x1c79, stored little endian.
-    const std::array<uint8_t, 9> expected{0xfc, 0x05, 0x00, 0x01, 0x71, 0x01, 0x79, 0x1c, 0xcc};
-    expect(MakeBudsOnHandoffFrame() == expected, "wrong SMEP frame, flags, body, length, CRC or trailer");
+    // Independent reference used by the Galaxy Book trace classifier.
+    auto expected = std::array<uint8_t, 18>{
+        0xfc, 0x0e, 0x00, 0x01, 0x43, 0x04, 0x03, 0x07, 0x00,
+        0x00, 0x0b, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0xcc
+    };
+    uint16_t crc = 0;
+    for (size_t i = 3; i < expected.size() - 3; ++i) {
+        crc ^= static_cast<uint16_t>(expected[i]) << 8;
+        for (unsigned bit = 0; bit < 8; ++bit)
+            crc = static_cast<uint16_t>((crc << 1) ^ ((crc & 0x8000) ? 0x1021 : 0));
+    }
+    expected[15] = static_cast<uint8_t>(crc);
+    expected[16] = static_cast<uint8_t>(crc >> 8);
+    expect(BudsOnHostSetupFrame == expected, "wrong SMEP frame, flags, body, length, CRC or trailer");
 
     BudsOnHandoffGate gate;
     expect(gate.consume(0, 9000) == 4, "zero ticket accepted");
     expect(gate.consume(11, 9000) == 4, "request accepted without preparation");
     gate.arm(11, 500);
-    expect(gate.consume(11, 500) == 6, "request accepted during preparation");
-    expect(gate.consume(11, 3499) == 6, "request accepted before baseline elapsed");
-    expect(gate.consume(12, 3500) == 4, "wrong ticket accepted");
-    expect(gate.consume(11, 3500) == 0, "valid request at 3s rejected");
-    expect(gate.consume(11, 3500) == 4, "ticket reused after send attempt");
+    expect(gate.consume(12, 500) == 4, "wrong ticket accepted");
+    expect(gate.consume(11, 500) == 0, "confirmed request rejected after preparation");
+    expect(gate.consume(11, 500) == 4, "ticket reused after send attempt");
 
     gate.arm(13, 10000);
     gate.arm(14, 11000);

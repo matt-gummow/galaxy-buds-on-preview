@@ -1,0 +1,645 @@
+diff --git a/GalaxyBudsClient/Interface/Pages/EqualizerPage.axaml b/GalaxyBudsClient/Interface/Pages/EqualizerPage.axaml
+index 8602e25..e6234ee 100644
+--- a/GalaxyBudsClient/Interface/Pages/EqualizerPage.axaml
++++ b/GalaxyBudsClient/Interface/Pages/EqualizerPage.axaml
+@@ -21,31 +21,12 @@
+                 <ext:RequiresConnectedDeviceBehavior />
+             </Interaction.Behaviors>
+             
+-            <StackPanel IsVisible="{Binding IsBudsOnEqualizer}" Spacing="8">
+-                <controls:SettingsGroup>
+-                    <controls:SettingsSymbolItem Content="Current preset"
+-                                                 Description="{Binding BudsOnEqualizerDescription, Mode=OneWay}"
+-                                                 Symbol="DeviceEq" />
+-                </controls:SettingsGroup>
+-                <Button Content="Change preset…"
+-                        IsEnabled="{Binding CanSetBudsOnEqualizer}"
+-                        Click="OnSetBudsOnEqualizerClicked" />
+-                <TextBlock IsVisible="{Binding IsBudsOnCustomEqualizer}"
+-                           Text="Select a standard preset on your Galaxy to change presets here."
+-                           TextWrapping="Wrap" />
+-                <Button Content="View custom EQ curves…"
+-                        IsEnabled="{Binding CanReadBudsOnEqualizerCurves}"
+-                        Click="OnReadBudsOnEqualizerCurvesClicked" />
+-                <Button Content="Refresh status"
+-                        IsEnabled="{Binding CanReadBudsOnEqualizerCurves}"
+-                        Click="OnRefreshBudsOnEqualizerClicked" />
+-            </StackPanel>
+-
+-            <controls:SettingsGroup IsVisible="{Binding !IsBudsOnEqualizer}">
++            <controls:SettingsGroup>
+                 <controls:SettingsComboBoxItem
+                     Content="{ext:Translate {x:Static i18N:Keys.EqHeader}}"
+-                    Description="Choose a preset, Custom for your own 9-band curve, or Off"
++                    Description="{Binding EqualizerDescription}"
+                     Symbol="DeviceEq"
++                    IsEnabled="{Binding CanChooseEqualizerPreset}"
+                     ItemsSource="{Binding EqOptions}"
+                     DisplayMemberBinding="{Binding}"
+                     SelectedValue="{Binding SelectedEqOption}" />
+@@ -61,6 +42,18 @@
+                 </controls:SettingsSwitchItem>
+             </controls:SettingsGroup>
+ 
++            <StackPanel IsVisible="{Binding IsBudsOnEqualizer}" Spacing="8">
++                <Button Content="View custom EQ curves…"
++                        IsEnabled="{Binding CanReadBudsOnEqualizerCurves}"
++                        Click="OnReadBudsOnEqualizerCurvesClicked" />
++                <Button Content="Refresh status"
++                        IsEnabled="{Binding CanReadBudsOnEqualizerCurves}"
++                        Click="OnRefreshBudsOnEqualizerClicked" />
++                <TextBlock Text="{Binding BudsOnEqualizerResult}"
++                           IsVisible="{Binding HasBudsOnEqualizerResult}"
++                           TextWrapping="Wrap" />
++            </StackPanel>
++
+             <controls:SettingsGroup>
+                 <Interaction.Behaviors>
+                     <ext:RequiresFeatureBehavior Feature="CustomEqualizer" />
+diff --git a/GalaxyBudsClient/Interface/Pages/EqualizerPage.axaml.cs b/GalaxyBudsClient/Interface/Pages/EqualizerPage.axaml.cs
+index ddc2b73..92dd602 100644
+--- a/GalaxyBudsClient/Interface/Pages/EqualizerPage.axaml.cs
++++ b/GalaxyBudsClient/Interface/Pages/EqualizerPage.axaml.cs
+@@ -1,6 +1,4 @@
+ using System;
+-using System.Collections.Generic;
+-using System.Linq;
+ using Avalonia.Controls;
+ using Avalonia.Interactivity;
+ using Avalonia.Media;
+@@ -21,102 +19,6 @@ public partial class EqualizerPage : BasePage<EqualizerPageViewModel>
+         InitializeComponent();
+     }
+ 
+-    private async void OnSetBudsOnEqualizerClicked(object? sender, RoutedEventArgs e)
+-    {
+-        if (_budsOnEqualizerActionOpen || TopLevel.GetTopLevel(this) is not { } host)
+-            return;
+-
+-        var bluetooth = BluetoothImpl.Instance;
+-        var device = bluetooth.Device.Current;
+-        if (device == null || !bluetooth.IsBudsOnSettingsDevice(device))
+-            return;
+-
+-        _budsOnEqualizerActionOpen = true;
+-        try
+-        {
+-            if (bluetooth.BudsOnReadOnly)
+-            {
+-                await new MessageBox
+-                {
+-                    Title = "Buds On is in read-only mode",
+-                    Description = "You can turn off read-only mode in Settings."
+-                }.ShowAsync();
+-                return;
+-            }
+-
+-            if (BudsOnDiagnostics.GetEqualizerTestSample(device) is not { } sample ||
+-                BudsOnDiagnostics.GetEqualizerPresetName(sample.Preset) is not { } currentName)
+-            {
+-                await new MessageBox
+-                {
+-                    Title = "Fresh standard preset needed",
+-                    Description = "Use Refresh status. If Custom is active, select a standard preset on your Galaxy first."
+-                }.ShowAsync();
+-                return;
+-            }
+-
+-            var choices = new List<(byte Preset, string Name)>();
+-            for (byte preset = 0; preset <= 5; preset++)
+-            {
+-                if (preset != sample.Preset && BudsOnDiagnostics.GetEqualizerPresetName(preset) is { } name)
+-                    choices.Add((preset, name));
+-            }
+-
+-            if (choices.Count == 0)
+-                return;
+-
+-            var picker = new ComboBox
+-            {
+-                ItemsSource = choices.Select(choice => choice.Name).ToArray(),
+-                SelectedIndex = 0,
+-                MinWidth = 180
+-            };
+-            var dialog = new FAContentDialog
+-            {
+-                Title = "Change preset",
+-                Content = new StackPanel
+-                {
+-                    Spacing = 8,
+-                    Children =
+-                    {
+-                        new TextBlock
+-                        {
+-                            Text = $"Your earbuds report {currentName}. Choose a different preset.",
+-                            TextWrapping = TextWrapping.Wrap
+-                        },
+-                        picker
+-                    }
+-                },
+-                PrimaryButtonText = "Apply preset",
+-                CloseButtonText = "Cancel",
+-                DefaultButton = FAContentDialogButton.Close
+-            };
+-            if (await dialog.ShowAsync(host) != FAContentDialogResult.Primary ||
+-                (uint)picker.SelectedIndex >= (uint)choices.Count)
+-                return;
+-
+-            var outcome = await bluetooth.SetBudsOnEqualizerAsync(device, sample, choices[picker.SelectedIndex].Preset);
+-            await new MessageBox
+-            {
+-                Title = "Equalizer preset",
+-                Description = outcome
+-            }.ShowAsync();
+-        }
+-        catch (Exception ex)
+-        {
+-            Log.Error(ex, "Buds On preset change failed");
+-            await new MessageBox
+-            {
+-                Title = "Preset change interrupted",
+-                Description = "Check the current preset on your Galaxy."
+-            }.ShowAsync();
+-        }
+-        finally
+-        {
+-            _budsOnEqualizerActionOpen = false;
+-        }
+-    }
+-
+     private async void OnRefreshBudsOnEqualizerClicked(object? sender, RoutedEventArgs e)
+     {
+         if (_budsOnEqualizerActionOpen)
+diff --git a/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml b/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml
+index b0488b0..a07d916 100644
+--- a/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml
++++ b/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml
+@@ -27,42 +27,26 @@
+ 
+             <StackPanel IsVisible="{Binding IsBudsOnTouchpad}" Spacing="8">
+                 <controls:SettingsGroup IsEnabled="{Binding !IsBudsOnTouchpadBusy}">
+-                    <controls:SettingsSymbolItem
++                    <controls:SettingsSwitchItem
+                         Content="Media controls"
+-                        Description="{Binding BudsOnMedia.Description}"
+-                        Symbol="VideoPlayPause">
+-                        <controls:SettingsSymbolItem.Footer>
+-                            <Button Content="{Binding BudsOnMedia.Action}"
+-                                    IsEnabled="{Binding BudsOnMedia.CanChange}"
+-                                    CommandParameter="{Binding BudsOnMedia.DesiredValue}"
+-                                    AutomationProperties.Name="Change Media controls"
+-                                    Click="OnBudsOnMediaClicked" />
+-                        </controls:SettingsSymbolItem.Footer>
+-                    </controls:SettingsSymbolItem>
+-                    <controls:SettingsSymbolItem
+-                        Content="Answer call or end call"
+-                        Description="{Binding BudsOnAnswerOrEnd.Description}"
+-                        Symbol="CallInbound">
+-                        <controls:SettingsSymbolItem.Footer>
+-                            <Button Content="{Binding BudsOnAnswerOrEnd.Action}"
+-                                    IsEnabled="{Binding BudsOnAnswerOrEnd.CanChange}"
+-                                    CommandParameter="{Binding BudsOnAnswerOrEnd.DesiredValue}"
+-                                    AutomationProperties.Name="Change Answer call or end call"
+-                                    Click="OnBudsOnAnswerOrEndClicked" />
+-                        </controls:SettingsSymbolItem.Footer>
+-                    </controls:SettingsSymbolItem>
+-                    <controls:SettingsSymbolItem
+-                        Content="Decline call"
+-                        Description="{Binding BudsOnDecline.Description}"
+-                        Symbol="CallProhibited">
+-                        <controls:SettingsSymbolItem.Footer>
+-                            <Button Content="{Binding BudsOnDecline.Action}"
+-                                    IsEnabled="{Binding BudsOnDecline.CanChange}"
+-                                    CommandParameter="{Binding BudsOnDecline.DesiredValue}"
+-                                    AutomationProperties.Name="Change Decline call"
+-                                    Click="OnBudsOnDeclineClicked" />
+-                        </controls:SettingsSymbolItem.Footer>
+-                    </controls:SettingsSymbolItem>
++                        Description="{Binding BudsOnMediaDescription}"
++                        Symbol="VideoPlayPause"
++                        IsChecked="{Binding IsBudsOnMediaEnabled, Mode=TwoWay}"
++                        IsEnabled="{Binding BudsOnMedia.CanChange}" />
++                    <controls:SettingsSwitchItem
++                        Content="{ext:Translate {x:Static i18N:Keys.TouchpadGestureDoubleForCall}}"
++                        Description="{Binding BudsOnAnswerOrEndDescription}"
++                        Symbol="CallInbound"
++                        IsChecked="{Binding IsBudsOnAnswerOrEndEnabled, Mode=TwoWay}"
++                        IsEnabled="{Binding BudsOnAnswerOrEnd.CanChange}" />
++                    <controls:SettingsSwitchItem
++                        Content="{ext:Translate {x:Static i18N:Keys.TouchpadGestureHoldForCall}}"
++                        Description="{Binding BudsOnDeclineDescription}"
++                        Symbol="CallProhibited"
++                        IsChecked="{Binding IsBudsOnDeclineEnabled, Mode=TwoWay}"
++                        IsEnabled="{Binding BudsOnDecline.CanChange}" />
++                </controls:SettingsGroup>
++                <controls:SettingsGroup IsEnabled="{Binding !IsBudsOnTouchpadBusy}">
+                     <controls:SettingsSymbolItem
+                         Content="Volume on left hold"
+                         Description="{Binding BudsOnLeftHoldVolume.Description}"
+diff --git a/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml.cs b/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml.cs
+index ee5885a..df63203 100644
+--- a/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml.cs
++++ b/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml.cs
+@@ -18,15 +18,6 @@ public partial class TouchpadPage : BasePage<TouchpadPageViewModel>
+         InitializeComponent();
+     }
+     
+-    private async void OnBudsOnMediaClicked(object? sender, RoutedEventArgs e) =>
+-        await SetBudsOnTouchpadOptionAsync(sender, BudsOnDiagnostics.Option.Media);
+-
+-    private async void OnBudsOnAnswerOrEndClicked(object? sender, RoutedEventArgs e) =>
+-        await SetBudsOnTouchpadOptionAsync(sender, BudsOnDiagnostics.Option.AnswerOrEnd);
+-
+-    private async void OnBudsOnDeclineClicked(object? sender, RoutedEventArgs e) =>
+-        await SetBudsOnTouchpadOptionAsync(sender, BudsOnDiagnostics.Option.Decline);
+-
+     private async void OnBudsOnLeftHoldVolumeClicked(object? sender, RoutedEventArgs e) =>
+         await SetBudsOnTouchpadOptionAsync(sender, BudsOnDiagnostics.Option.LeftHoldVolume, "left");
+ 
+@@ -73,10 +64,7 @@ public partial class TouchpadPage : BasePage<TouchpadPageViewModel>
+                     return;
+             }
+ 
+-            viewModel.BudsOnTouchpadResult = "Applying change…";
+-            var result = await bluetooth.SetBudsOnOptionAsync(device, option, desired);
+-            if (ReferenceEquals(bluetooth.Device.Current, device))
+-                viewModel.BudsOnTouchpadResult = result;
++            await viewModel.ApplyBudsOnTouchpadOptionAsync(device, option, desired);
+         }
+         finally
+         {
+diff --git a/GalaxyBudsClient/Interface/ViewModels/Pages/EqualizerPageViewModel.cs b/GalaxyBudsClient/Interface/ViewModels/Pages/EqualizerPageViewModel.cs
+index 32ebf8a..5bc6828 100644
+--- a/GalaxyBudsClient/Interface/ViewModels/Pages/EqualizerPageViewModel.cs
++++ b/GalaxyBudsClient/Interface/ViewModels/Pages/EqualizerPageViewModel.cs
+@@ -23,18 +23,50 @@ namespace GalaxyBudsClient.Interface.ViewModels.Pages;
+ 
+ public partial class EqualizerPageViewModel : MainPageViewModelBase
+ {
++    private static readonly EqOption[] BudsOnStandardEqOptions =
++    [
++        new(0, BudsOnDiagnostics.GetEqualizerPresetName(0)!),
++        new(1, BudsOnDiagnostics.GetEqualizerPresetName(1)!),
++        new(2, BudsOnDiagnostics.GetEqualizerPresetName(2)!),
++        new(3, BudsOnDiagnostics.GetEqualizerPresetName(3)!),
++        new(4, BudsOnDiagnostics.GetEqualizerPresetName(4)!),
++        new(5, BudsOnDiagnostics.GetEqualizerPresetName(5)!)
++    ];
++
++    private static readonly EqOption[] BudsOnCustomEqOptions =
++        [.. BudsOnStandardEqOptions, new(6, "Custom")];
++
+     private readonly DispatcherTimer _budsOnEqualizerTimer = new() { Interval = TimeSpan.FromSeconds(1) };
++    private Device? _budsOnEqualizerDevice;
+     private byte? _budsOnEqualizerPreset;
++    private bool _budsOnEqualizerBusy;
++    private bool _hasLiveBudsOnEqualizer;
++    private bool _canSetBudsOnEqualizer;
++    private string? _budsOnEqualizerResult;
+ 
+-    public bool IsBudsOnEqualizer { get; private set; }
+-    public bool CanSetBudsOnEqualizer { get; private set; }
++    public bool IsBudsOnEqualizer => _budsOnEqualizerDevice is not null;
++    public bool CanChooseEqualizerPreset => !IsBudsOnEqualizer || _canSetBudsOnEqualizer && !_budsOnEqualizerBusy;
+     public bool CanReadBudsOnEqualizerCurves { get; private set; }
+-    private bool _hasLiveBudsOnEqualizer;
+-    public bool IsBudsOnCustomEqualizer => IsBudsOnEqualizer && _budsOnEqualizerPreset == 6;
+-    public string BudsOnEqualizerDescription => _budsOnEqualizerPreset is { } preset
+-        ? (BudsOnDiagnostics.GetEqualizerPresetName(preset) ?? "Unknown preset") +
+-            (_hasLiveBudsOnEqualizer ? "" : " · Last reported")
+-        : "Waiting for earbuds";
++    public bool HasBudsOnEqualizerResult => !string.IsNullOrEmpty(_budsOnEqualizerResult);
++    public string? BudsOnEqualizerResult
++    {
++        get => _budsOnEqualizerResult;
++        private set
++        {
++            this.RaiseAndSetIfChanged(ref _budsOnEqualizerResult, value);
++            this.RaisePropertyChanged(nameof(HasBudsOnEqualizerResult));
++        }
++    }
++
++    public string EqualizerDescription => !IsBudsOnEqualizer
++        ? "Choose a preset, Custom for your own 9-band curve, or Off"
++        : _budsOnEqualizerPreset switch
++        {
++            null => "Waiting for earbuds",
++            6 => "Custom is active. Select a standard preset on your Galaxy to make changes here.",
++            _ when !_hasLiveBudsOnEqualizer => "Last reported preset",
++            _ => "Choose a preset"
++        };
+ 
+     public EqualizerPageViewModel()
+     {
+@@ -62,31 +94,118 @@ public partial class EqualizerPageViewModel : MainPageViewModelBase
+     private void RefreshBudsOnEqualizer()
+     {
+         var bluetooth = BluetoothImpl.Instance;
+-        var device = bluetooth.Device.Current;
+-        var isBudsOn = device?.Model == Models.BudsOn;
+-        var canReadCurves = device is not null && isBudsOn && bluetooth.IsBudsOnSettingsDevice(device);
+-        var preset = device is not null && canReadCurves
+-            ? BudsOnDiagnostics.GetEqualizerPreset(device)
+-            : null;
+-        var livePreset = canReadCurves && BudsOnDiagnostics.HasLiveBudsOnEqualizer(device!);
+-        var canSet = canReadCurves && !bluetooth.BudsOnReadOnly && BudsOnDiagnostics.GetEqualizerTestSample(device!) != null;
+-        if (IsBudsOnEqualizer == isBudsOn && _budsOnEqualizerPreset == preset &&
+-            CanReadBudsOnEqualizerCurves == canReadCurves && CanSetBudsOnEqualizer == canSet &&
++        var device = bluetooth.Device.Current is { Model: Models.BudsOn } selected ? selected : null;
++        var wasBudsOn = IsBudsOnEqualizer;
++        if (!ReferenceEquals(_budsOnEqualizerDevice, device))
++            BudsOnEqualizerResult = null;
++
++        if (device is null)
++        {
++            if (wasBudsOn)
++            {
++                _isSyncingEqOption = true;
++                try
++                {
++                    EqOptions = BuildEqOptions(bluetooth.DeviceSpec.Supports(Features.CustomEqualizer));
++                }
++                finally
++                {
++                    _isSyncingEqOption = false;
++                }
++                SyncSelectedOption();
++            }
++            _budsOnEqualizerDevice = null;
++            if (wasBudsOn)
++                NotifyBudsOnEqualizerState();
++            return;
++        }
++
++        var canReadCurves = bluetooth.IsBudsOnSettingsDevice(device);
++        var preset = canReadCurves ? BudsOnDiagnostics.GetEqualizerPreset(device) : null;
++        var livePreset = canReadCurves && BudsOnDiagnostics.HasLiveBudsOnEqualizer(device);
++        var canSet = canReadCurves && !bluetooth.BudsOnReadOnly &&
++                     BudsOnDiagnostics.GetEqualizerTestSample(device) is not null;
++        if (ReferenceEquals(_budsOnEqualizerDevice, device) && _budsOnEqualizerPreset == preset &&
++            CanReadBudsOnEqualizerCurves == canReadCurves && _canSetBudsOnEqualizer == canSet &&
+             _hasLiveBudsOnEqualizer == livePreset)
+             return;
+ 
+-        IsBudsOnEqualizer = isBudsOn;
++        _budsOnEqualizerDevice = device;
+         _budsOnEqualizerPreset = preset;
+         _hasLiveBudsOnEqualizer = livePreset;
+-        CanSetBudsOnEqualizer = canSet;
++        _canSetBudsOnEqualizer = canSet;
+         CanReadBudsOnEqualizerCurves = canReadCurves;
++        SyncBudsOnEqualizerSelection();
++        NotifyBudsOnEqualizerState();
++    }
++
++    private void NotifyBudsOnEqualizerState()
++    {
+         this.RaisePropertyChanged(nameof(IsBudsOnEqualizer));
+-        this.RaisePropertyChanged(nameof(BudsOnEqualizerDescription));
+-        this.RaisePropertyChanged(nameof(CanSetBudsOnEqualizer));
+-        this.RaisePropertyChanged(nameof(IsBudsOnCustomEqualizer));
++        this.RaisePropertyChanged(nameof(EqualizerDescription));
++        this.RaisePropertyChanged(nameof(CanChooseEqualizerPreset));
+         this.RaisePropertyChanged(nameof(CanReadBudsOnEqualizerCurves));
+     }
+ 
++    private void SyncBudsOnEqualizerSelection()
++    {
++        _isSyncingEqOption = true;
++        try
++        {
++            EqOptions = _budsOnEqualizerPreset == 6 ? BudsOnCustomEqOptions : BudsOnStandardEqOptions;
++            SelectedEqOption = _budsOnEqualizerPreset is { } preset && preset < EqOptions.Length
++                ? EqOptions[preset]
++                : null;
++        }
++        finally
++        {
++            _isSyncingEqOption = false;
++        }
++    }
++
++    private async Task ApplyBudsOnEqualizerAsync(int option)
++    {
++        if (_budsOnEqualizerBusy || option is < 0 or > 5)
++            return;
++
++        var bluetooth = BluetoothImpl.Instance;
++        var device = _budsOnEqualizerDevice;
++        if (device is null || !ReferenceEquals(bluetooth.Device.Current, device) ||
++            !CanChooseEqualizerPreset || !bluetooth.IsBudsOnSettingsDevice(device) ||
++            BudsOnDiagnostics.GetEqualizerTestSample(device) is not { } sample)
++        {
++            SyncBudsOnEqualizerSelection();
++            RefreshBudsOnEqualizer();
++            return;
++        }
++        if (sample.Preset == option)
++            return;
++
++        _budsOnEqualizerBusy = true;
++        this.RaisePropertyChanged(nameof(CanChooseEqualizerPreset));
++        BudsOnEqualizerResult = "Applying preset…";
++        try
++        {
++            var result = await bluetooth.SetBudsOnEqualizerAsync(device, sample, (byte)option);
++            if (ReferenceEquals(bluetooth.Device.Current, device))
++                BudsOnEqualizerResult = result;
++        }
++        catch (Exception ex)
++        {
++            Log.Error(ex, "Buds On preset change failed");
++            if (ReferenceEquals(bluetooth.Device.Current, device))
++                BudsOnEqualizerResult = "The preset change was interrupted. Refresh status before trying again.";
++        }
++        finally
++        {
++            _budsOnEqualizerBusy = false;
++            RefreshBudsOnEqualizer();
++            if (IsBudsOnEqualizer)
++                SyncBudsOnEqualizerSelection();
++            this.RaisePropertyChanged(nameof(CanChooseEqualizerPreset));
++        }
++    }
++
+     private void OnAnyMessageDecoded(object? sender, BaseMessageDecoder decoder)
+     {
+         // Custom EQ display is driven by the app's saved slots (see OnExtendedStatusUpdate and
+@@ -275,8 +394,12 @@ public partial class EqualizerPageViewModel : MainPageViewModelBase
+ 
+     private async void OnPropertyChanged(object? sender, PropertyChangedEventArgs args)
+     {
+-        if (BluetoothImpl.Instance.CurrentModel == Models.BudsOn)
++        if (BluetoothImpl.Instance.CurrentModel == Models.BudsOn || IsBudsOnEqualizer)
++        {
++            if (!_isSyncingEqOption && args.PropertyName == nameof(SelectedEqOption))
++                await ApplyBudsOnEqualizerAsync(SelectedEqOption?.Index ?? -1);
+             return;
++        }
+ 
+         // async void: an unobserved exception from a BT send would crash the app — guard the handler.
+         try
+@@ -410,6 +533,9 @@ public partial class EqualizerPageViewModel : MainPageViewModelBase
+ 
+     private void OnExtendedStatusUpdate(object? sender, ExtendedStatusUpdateDecoder e)
+     {
++        if (BluetoothImpl.Instance.CurrentModel == Models.BudsOn || IsBudsOnEqualizer)
++            return;
++
+         using (SuppressChangeNotifications())
+         {
+             if (BluetoothImpl.Instance.CurrentModel == Models.Buds)
+diff --git a/GalaxyBudsClient/Interface/ViewModels/Pages/TouchpadPageViewModel.cs b/GalaxyBudsClient/Interface/ViewModels/Pages/TouchpadPageViewModel.cs
+index 4692e20..516ffb4 100644
+--- a/GalaxyBudsClient/Interface/ViewModels/Pages/TouchpadPageViewModel.cs
++++ b/GalaxyBudsClient/Interface/ViewModels/Pages/TouchpadPageViewModel.cs
+@@ -2,6 +2,7 @@ using System;
+ using System.Collections.Generic;
+ using System.ComponentModel;
+ using System.Linq;
++using System.Threading.Tasks;
+ using Avalonia.Controls;
+ using Avalonia.Threading;
+ using FluentIcons.Common;
+@@ -51,6 +52,7 @@ public partial class TouchpadPageViewModel : MainPageViewModelBase
+     private bool _isBudsOnTouchpad;
+     private bool _canRefreshBudsOnTouchpad;
+     private bool _isBudsOnTouchpadBusy;
++    private bool _syncingBudsOnTouchpad;
+     private string? _budsOnTouchpadResult;
+     private BudsOnTouchSetting _budsOnMedia = new(null);
+     private BudsOnTouchSetting _budsOnAnswerOrEnd = new(null);
+@@ -63,6 +65,34 @@ public partial class TouchpadPageViewModel : MainPageViewModelBase
+     public BudsOnTouchSetting BudsOnMedia => _budsOnMedia;
+     public BudsOnTouchSetting BudsOnAnswerOrEnd => _budsOnAnswerOrEnd;
+     public BudsOnTouchSetting BudsOnDecline => _budsOnDecline;
++
++    public bool? IsBudsOnMediaEnabled
++    {
++        get => BudsOnMedia.Enabled;
++        set => _ = SetBudsOnTouchpadSwitchAsync(BudsOnDiagnostics.Option.Media, BudsOnMedia, value);
++    }
++
++    public bool? IsBudsOnAnswerOrEndEnabled
++    {
++        get => BudsOnAnswerOrEnd.Enabled;
++        set => _ = SetBudsOnTouchpadSwitchAsync(BudsOnDiagnostics.Option.AnswerOrEnd, BudsOnAnswerOrEnd, value);
++    }
++
++    public bool? IsBudsOnDeclineEnabled
++    {
++        get => BudsOnDecline.Enabled;
++        set => _ = SetBudsOnTouchpadSwitchAsync(BudsOnDiagnostics.Option.Decline, BudsOnDecline, value);
++    }
++
++    public string BudsOnMediaDescription => DescribeBudsOnSwitch(BudsOnMedia, "Play, pause and skip tracks");
++    public string BudsOnAnswerOrEndDescription =>
++        DescribeBudsOnSwitch(BudsOnAnswerOrEnd, Strings.TouchpadGestureDoubleForCallDesc);
++    public string BudsOnDeclineDescription =>
++        DescribeBudsOnSwitch(BudsOnDecline, Strings.TouchpadGestureHoldForCallDesc);
++
++    private static string DescribeBudsOnSwitch(BudsOnTouchSetting state, string action) =>
++        state.CanSend ? action : state.Description;
++
+     public BudsOnTouchSetting BudsOnLeftHoldVolume => _budsOnLeftHoldVolume;
+     public BudsOnTouchSetting BudsOnRightHoldVolume => _budsOnRightHoldVolume;
+     public bool HasBudsOnTouchpadResult => !string.IsNullOrEmpty(BudsOnTouchpadResult);
+@@ -147,15 +177,86 @@ public partial class TouchpadPageViewModel : MainPageViewModelBase
+             new(canRead ? BudsOnDiagnostics.GetControlValue(device!, option) : null, experimental,
+                 bluetooth.BudsOnReadOnly, canRead && BudsOnDiagnostics.GetOptionSample(device!, option) != null);
+ 
+-        this.RaiseAndSetIfChanged(ref _budsOnMedia, Read(BudsOnDiagnostics.Option.Media), nameof(BudsOnMedia));
+-        this.RaiseAndSetIfChanged(ref _budsOnAnswerOrEnd, Read(BudsOnDiagnostics.Option.AnswerOrEnd), nameof(BudsOnAnswerOrEnd));
+-        this.RaiseAndSetIfChanged(ref _budsOnDecline, Read(BudsOnDiagnostics.Option.Decline), nameof(BudsOnDecline));
++        var media = Read(BudsOnDiagnostics.Option.Media);
++        var answerOrEnd = Read(BudsOnDiagnostics.Option.AnswerOrEnd);
++        var decline = Read(BudsOnDiagnostics.Option.Decline);
++        if (BudsOnMedia != media || BudsOnAnswerOrEnd != answerOrEnd || BudsOnDecline != decline)
++        {
++            _syncingBudsOnTouchpad = true;
++            try
++            {
++                this.RaiseAndSetIfChanged(ref _budsOnMedia, media, nameof(BudsOnMedia));
++                this.RaiseAndSetIfChanged(ref _budsOnAnswerOrEnd, answerOrEnd, nameof(BudsOnAnswerOrEnd));
++                this.RaiseAndSetIfChanged(ref _budsOnDecline, decline, nameof(BudsOnDecline));
++                NotifyBudsOnTouchpadSwitches();
++            }
++            finally
++            {
++                _syncingBudsOnTouchpad = false;
++            }
++        }
+         this.RaiseAndSetIfChanged(ref _budsOnLeftHoldVolume,
+             Read(BudsOnDiagnostics.Option.LeftHoldVolume, experimental: true), nameof(BudsOnLeftHoldVolume));
+         this.RaiseAndSetIfChanged(ref _budsOnRightHoldVolume,
+             Read(BudsOnDiagnostics.Option.RightHoldVolume, experimental: true), nameof(BudsOnRightHoldVolume));
+     }
+ 
++    private async Task SetBudsOnTouchpadSwitchAsync(BudsOnDiagnostics.Option option, BudsOnTouchSetting state,
++        bool? value)
++    {
++        if (_syncingBudsOnTouchpad || !IsBudsOnTouchpad || IsBudsOnTouchpadBusy ||
++            !state.CanChange || value is not { } desired || desired == state.Enabled)
++            return;
++
++        var bluetooth = BluetoothImpl.Instance;
++        var device = _budsOnTouchpadDevice;
++        if (device is null || !bluetooth.IsBudsOnSettingsDevice(device))
++            return;
++
++        IsBudsOnTouchpadBusy = true;
++        try
++        {
++            if (BudsOnDiagnostics.GetControlValue(device, option) == !desired)
++                await ApplyBudsOnTouchpadOptionAsync(device, option, desired);
++            else
++                BudsOnTouchpadResult = "Check the current setting and try again.";
++        }
++        finally
++        {
++            RefreshBudsOnTouchpad();
++            NotifyBudsOnTouchpadSwitches();
++            IsBudsOnTouchpadBusy = false;
++        }
++    }
++
++    internal async Task ApplyBudsOnTouchpadOptionAsync(Device device, BudsOnDiagnostics.Option option, bool desired)
++    {
++        var bluetooth = BluetoothImpl.Instance;
++        BudsOnTouchpadResult = "Applying change…";
++        try
++        {
++            var result = await bluetooth.SetBudsOnOptionAsync(device, option, desired);
++            if (ReferenceEquals(bluetooth.Device.Current, device))
++                BudsOnTouchpadResult = result;
++        }
++        catch (Exception ex)
++        {
++            Log.Warning(ex, "Buds On touch control change interrupted");
++            if (ReferenceEquals(bluetooth.Device.Current, device))
++                BudsOnTouchpadResult = "The setting change was interrupted. Refresh status before trying again.";
++        }
++    }
++
++    private void NotifyBudsOnTouchpadSwitches()
++    {
++        this.RaisePropertyChanged(nameof(IsBudsOnMediaEnabled));
++        this.RaisePropertyChanged(nameof(IsBudsOnAnswerOrEndEnabled));
++        this.RaisePropertyChanged(nameof(IsBudsOnDeclineEnabled));
++        this.RaisePropertyChanged(nameof(BudsOnMediaDescription));
++        this.RaisePropertyChanged(nameof(BudsOnAnswerOrEndDescription));
++        this.RaisePropertyChanged(nameof(BudsOnDeclineDescription));
++    }
++
+     private void OnConnected(object? sender, EventArgs e)
+     {
+         UpdateTouchActions();
+@@ -166,6 +267,8 @@ public partial class TouchpadPageViewModel : MainPageViewModelBase
+     {
+         UpdateTouchActions();
+         UpdateEditStates();
++        this.RaisePropertyChanged(nameof(BudsOnAnswerOrEndDescription));
++        this.RaisePropertyChanged(nameof(BudsOnDeclineDescription));
+     }
+ 
+     private void OnExtendedStatusUpdate(object? sender, ExtendedStatusUpdateDecoder e)
