@@ -70,6 +70,7 @@ jobs:
           git apply "$GITHUB_WORKSPACE/patches/buds-on-host-setup.patch"
           git apply "$GITHUB_WORKSPACE/patches/buds-on-shared-controls.patch"
           git apply "$GITHUB_WORKSPACE/patches/buds-on-battery-display.patch"
+          git apply "$GITHUB_WORKSPACE/patches/buds-on-manager-fixes.patch"
           python3 "$GITHUB_WORKSPACE/scripts/stamp_preview.py" "$PWD"
           bash "$GITHUB_WORKSPACE/tests/run-handoff-tests.sh" "$PWD"
 
@@ -152,7 +153,7 @@ jobs:
             grep -Eq "[[:space:]]_bt_budson_handoff_${suffix}$" "$RUNNER_TEMP/buds-exports.txt"
           done
           mkdir -p installer
-          cp "${packages[0]}" installer/GalaxyBudsOn-Handoff-Preview-3-macOS-arm64.pkg
+          cp "${packages[0]}" installer/GalaxyBudsOn-Handoff-Preview-4-macOS-arm64.pkg
           shasum -a 256 installer/*.pkg
 
       - name: Upload macOS installer

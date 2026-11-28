@@ -10,7 +10,7 @@ The workflow checks out upstream commit `85dfc8bb39fc45d3c30ecf71ab2c663fb1d4172
 
 ## Mac–Fold handoff preview
 
-Preview 3 (5.2.1.3) brings the Buds On Connection Check 1.5 host setup into Galaxy Buds Manager. It sends the same Galaxy Book setup message once and holds a separate Samsung control channel during the handoff. [Preview builds](https://github.com/matt-gummow/galaxy-buds-on-preview/actions/workflows/build-buds-on-macos.yml)
+Preview 4 (5.2.1.4) fixes a crash opening Home, removes unsupported Buds On pages, and restores displayed touch switch values when a change fails. It also updates Avalonia to address a macOS shutdown crash. The Manager sends the same Galaxy Book setup message once and holds a separate Samsung control channel during the handoff. [Preview builds](https://github.com/matt-gummow/galaxy-buds-on-preview/actions/workflows/build-buds-on-macos.yml)
 
 Connect the selected Buds On to the Mac and confirm that Mac audio plays through them. In **Settings → Experimental Mac audio handoff**, select **Send setup once**. Reconnect the Fold once, then take a Fold call while Mac audio is playing. After hanging up, press Play on the Mac if the player stayed paused. The standalone check confirmed that the call switched automatically and Mac playback returned when restarted, without a manual Bluetooth reconnect. Use **End handoff session** to release the control channel.
 
