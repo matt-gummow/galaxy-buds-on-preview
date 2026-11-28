@@ -12,6 +12,8 @@ The workflow checks out upstream commit `85dfc8bb39fc45d3c30ecf71ab2c663fb1d4172
 
 Preview 5 (5.2.1.5) uses the Manager’s Multipoint panel for Buds On. The Manager sends the same Galaxy Book setup message once and holds a separate Samsung control channel during the handoff. [Preview builds](https://github.com/matt-gummow/galaxy-buds-on-preview/actions/workflows/build-buds-on-macos.yml)
 
+In Preview 6 (5.2.1.6), turn on **Follow Mac audio output** in Settings to let Manager select the registered Galaxy Buds that macOS is playing through once the previous Manager connection is idle. This opt-in applies to Bluetooth outputs whose address can be matched to a registered pair. It does not change the system audio output.
+
 In **Settings → Multipoint**, turn on **Enable multipoint automatically** to set up switching when Buds On connects to the Mac. The preference is off by default. **Apply now** sets up the current connection and reports when the session is already active. Turning the preference off ends the Buds On session.
 
 For the Manager hardware check, reconnect the Fold once during the initial setup and take a Fold call while Mac audio is playing. After hanging up, press Play if the Mac player stayed paused. Repeat after a charging-case cycle to verify automatic setup. The connection report is available in **Settings → Buds On diagnostics**.

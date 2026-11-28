@@ -1,0 +1,381 @@
+diff --git a/GalaxyBudsClient.Platform.OSX/BluetoothService.cs b/GalaxyBudsClient.Platform.OSX/BluetoothService.cs
+index a1e270d1059bdc76e8e99dc0690973e0297e52c1..852f4af6f4c46fd370d362f563911fb8b9e611ba 100644
+--- a/GalaxyBudsClient.Platform.OSX/BluetoothService.cs
++++ b/GalaxyBudsClient.Platform.OSX/BluetoothService.cs
+@@ -198,12 +198,13 @@ namespace GalaxyBudsClient.Platform.OSX
+         {
+             if (ConnSemaphore.CurrentCount == 1)
+             {
++                var macAddr = NativeUtf8ToMacAddress(mac);
+                 var reconnect = new Action(async () =>
+                 {
+                     try
+                     {
+-                        await ConnectAsync(_currentMac, _currentUuid, CancellationToken.None,
+-                            _currentDiagnostics, _currentDiagnosticRx, _currentDiagnosticStarted);
++                        await ConnectCoreAsync(macAddr, _currentUuid, CancellationToken.None,
++                            _currentDiagnostics, _currentDiagnosticRx, _currentDiagnosticStarted, reconnect: true);
+                     }
+                     catch (BluetoothException ex)
+                     {
+@@ -211,7 +212,6 @@ namespace GalaxyBudsClient.Platform.OSX
+                     }
+                 });
+ 
+-                var macAddr = NativeUtf8ToMacAddress(mac);
+                 if (string.Equals(macAddr, _currentMac, StringComparison.CurrentCultureIgnoreCase))
+                 {
+                     Log.Debug("OSX.BluetoothService: Reconnecting to {MacAddr}", macAddr);
+@@ -232,8 +232,12 @@ namespace GalaxyBudsClient.Platform.OSX
+         public Task ConnectAsync(string macAddress, string uuid, CancellationToken cancelToken) =>
+             ConnectAsync(macAddress, uuid, cancelToken, null, null, null);
+ 
+-        public async Task ConnectAsync(string macAddress, string uuid, CancellationToken cancelToken,
+-            Action<string>? diagnostics, Action<byte[], ulong>? diagnosticRx, Action? diagnosticStarted)
++        public Task ConnectAsync(string macAddress, string uuid, CancellationToken cancelToken,
++            Action<string>? diagnostics, Action<byte[], ulong>? diagnosticRx, Action? diagnosticStarted) =>
++            ConnectCoreAsync(macAddress, uuid, cancelToken, diagnostics, diagnosticRx, diagnosticStarted, reconnect: false);
++
++        private async Task ConnectCoreAsync(string macAddress, string uuid, CancellationToken cancelToken,
++            Action<string>? diagnostics, Action<byte[], ulong>? diagnosticRx, Action? diagnosticStarted, bool reconnect)
+         {
+             var semResult = await ConnSemaphore.WaitAsync(5000, cancelToken);
+             if (semResult == false)
+@@ -243,6 +247,9 @@ namespace GalaxyBudsClient.Platform.OSX
+             }
+ 
+             try {
++                if (reconnect && !string.Equals(macAddress, _currentMac, StringComparison.OrdinalIgnoreCase))
++                    return;
++
+                 if (IsStreamConnected)
+                 {
+                     Log.Debug("OSX.BluetoothService: Already connected, skipped");
+@@ -324,6 +331,24 @@ namespace GalaxyBudsClient.Platform.OSX
+         #endregion
+ 
+         #region Disconnection
++        public bool StopReconnectIfIdle()
++        {
++            if (!ConnSemaphore.Wait(0))
++                return false;
++
++            try
++            {
++                if (IsStreamConnected)
++                    return false;
++                _currentMac = string.Empty;
++                return true;
++            }
++            finally
++            {
++                ConnSemaphore.Release();
++            }
++        }
++
+         public async Task DisconnectAsync()
+         {
+             Log.Debug("OSX.BluetoothService: Disconnecting...");
+diff --git a/GalaxyBudsClient.Platform.OSX/BudsOnAudioRoute.cs b/GalaxyBudsClient.Platform.OSX/BudsOnAudioRoute.cs
+index 30bd5e35c4822bedecb35a168e0d52749438086d..cf8b69d07eebb9565edf56bbaf743c436c01b4f7 100644
+--- a/GalaxyBudsClient.Platform.OSX/BudsOnAudioRoute.cs
++++ b/GalaxyBudsClient.Platform.OSX/BudsOnAudioRoute.cs
+@@ -27,22 +27,40 @@ public static class BudsOnAudioRoute
+ 
+     public static string GetDefaultOutput(string expectedMac)
+     {
+-        if (!OperatingSystem.IsMacOS()) return Unavailable;
++        return ReadDefaultOutput() is { } output
++            ? Classify(output.Transport, output.Uid, expectedMac)
++            : Unavailable;
++    }
++
++    /// <summary>Returns the canonical address of a stable Classic Bluetooth system output.</summary>
++    public static string? GetDefaultBluetoothAddress()
++    {
++        return ReadDefaultOutput() is { } output
++            ? GetClassicBluetoothAddress(output.Transport, output.Uid)
++            : null;
++    }
++
++    private static (uint Transport, string? Uid)? ReadDefaultOutput()
++    {
++        if (!OperatingSystem.IsMacOS()) return null;
+         try
+         {
+             if (!TryReadProperty(SystemObject, DefaultOutput, out uint device) || device == 0 ||
+-                !TryReadProperty(device, TransportType, out uint transport)) return Unavailable;
++                !TryReadProperty(device, TransportType, out uint transport)) return null;
+ 
+             var uid = transport is Bluetooth or BluetoothLe ? ReadUid(device) : null;
+             // A route can disappear or change between the independent HAL property reads.
+             return TryReadProperty(SystemObject, DefaultOutput, out uint current) && current == device
+-                ? Classify(transport, uid, expectedMac)
+-                : Unavailable;
++                ? (transport, uid)
++                : null;
+         }
+-        catch (DllNotFoundException) { return Unavailable; }
+-        catch (EntryPointNotFoundException) { return Unavailable; }
++        catch (DllNotFoundException) { return null; }
++        catch (EntryPointNotFoundException) { return null; }
+     }
+ 
++    internal static string? GetClassicBluetoothAddress(uint transport, string? uid) =>
++        transport == Bluetooth ? AddressFromUid(uid) : null;
++
+     internal static string Classify(uint transport, string? uid, string expectedMac)
+     {
+         if (transport is not (Bluetooth or BluetoothLe))
+@@ -51,10 +69,7 @@ public static class BudsOnAudioRoute
+             return transport is BuiltIn or DisplayPort or Hdmi or Usb or AirPlay ? Other : Unavailable;
+         }
+ 
+-        // Match the mac-fold probe: a whole address, optionally followed by ":output".
+-        var address = uid?.EndsWith(OutputSuffix, StringComparison.OrdinalIgnoreCase) == true
+-            ? uid[..^OutputSuffix.Length] : uid;
+-        var actual = CanonicalAddress(address);
++        var actual = AddressFromUid(uid);
+         var expected = CanonicalAddress(expectedMac);
+         if (actual == null || expected == null) return Unconfirmed;
+         if (actual == expected) return "selected Buds";
+@@ -62,6 +77,14 @@ public static class BudsOnAudioRoute
+         return transport == Bluetooth ? Other : Unconfirmed;
+     }
+ 
++    private static string? AddressFromUid(string? uid)
++    {
++        // Match the mac-fold probe: a whole address, optionally followed by ":output".
++        var address = uid?.EndsWith(OutputSuffix, StringComparison.OrdinalIgnoreCase) == true
++            ? uid[..^OutputSuffix.Length] : uid;
++        return CanonicalAddress(address);
++    }
++
+     private static string? CanonicalAddress(string? address)
+     {
+         if (address?.Length != 17 || address[2] is not (':' or '-')) return null;
+diff --git a/GalaxyBudsClient/Interface/Pages/SettingsPage.axaml b/GalaxyBudsClient/Interface/Pages/SettingsPage.axaml
+index c9f6cdc410934316459e343de53e47d46f961169..223e681bae46521bf95391a975ef9032eb39942e 100644
+--- a/GalaxyBudsClient/Interface/Pages/SettingsPage.axaml
++++ b/GalaxyBudsClient/Interface/Pages/SettingsPage.axaml
+@@ -58,6 +58,11 @@
+                                              IsClickEnabled="True"
+                                              IsEnabled="{Binding CanManageDevices}"
+                                              Click="OnManageDevicesClicked" />
++                <controls:SettingsSwitchItem Content="Follow Mac audio output"
++                                             Description="Show controls for the paired Galaxy Buds playing Mac audio after the previous pair disconnects."
++                                             Symbol="BluetoothConnected"
++                                             IsVisible="{Binding CanFollowMacAudioOutput}"
++                                             IsChecked="{Binding FollowMacAudioOutput, Source={x:Static config:Settings.Data}}" />
+             </controls:SettingsGroup>
+ 
+             <ui:FASettingsExpander Header="{ext:Translate {x:Static i18N:Keys.SettingsAppearance}}" IsExpanded="True">
+diff --git a/GalaxyBudsClient/Interface/ViewModels/Pages/SettingsPageViewModel.cs b/GalaxyBudsClient/Interface/ViewModels/Pages/SettingsPageViewModel.cs
+index f2fe41561623f9eba4e0427741dbf33cb336a85e..65397a8f4365c6942e482d09d5ba3b3da98735d6 100644
+--- a/GalaxyBudsClient/Interface/ViewModels/Pages/SettingsPageViewModel.cs
++++ b/GalaxyBudsClient/Interface/ViewModels/Pages/SettingsPageViewModel.cs
+@@ -18,6 +18,7 @@ public partial class SettingsPageViewModel : MainPageViewModelBase
+     private bool _applyingMultipoint;
+ 
+     public bool IsBudsOnSelected => PlatformUtils.IsOSX && _multipointDevice?.Model == Models.BudsOn;
++    public bool CanFollowMacAudioOutput => PlatformUtils.IsOSX;
+     public string MultipointAutoTitle => IsBudsOnSelected
+         ? "Enable multipoint automatically" : Strings.SettingsMultipointAuto;
+     public string MultipointAutoDescription => IsBudsOnSelected
+diff --git a/GalaxyBudsClient/Model/Config/SettingsData.cs b/GalaxyBudsClient/Model/Config/SettingsData.cs
+index 7fc276d3ee13a119510cd98fd08976224f0f47d5..050a868770ced69afc3d45fa0b306370fc780d4b 100644
+--- a/GalaxyBudsClient/Model/Config/SettingsData.cs
++++ b/GalaxyBudsClient/Model/Config/SettingsData.cs
+@@ -81,6 +81,8 @@ public class SettingsData : ReactiveObject
+     public bool AutoEnableMultipoint { get => _autoEnableMultipoint; set => this.RaiseAndSetIfChanged(ref _autoEnableMultipoint, value); }
+     private bool _autoEnableBudsOnMultipoint;
+     public bool AutoEnableBudsOnMultipoint { get => _autoEnableBudsOnMultipoint; set => this.RaiseAndSetIfChanged(ref _autoEnableBudsOnMultipoint, value); }
++    private bool _followMacAudioOutput;
++    public bool FollowMacAudioOutput { get => _followMacAudioOutput; set => this.RaiseAndSetIfChanged(ref _followMacAudioOutput, value); }
+ 
+     
+     /* Touch actions */
+diff --git a/GalaxyBudsClient/Platform/BluetoothImpl.AudioOutput.cs b/GalaxyBudsClient/Platform/BluetoothImpl.AudioOutput.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..414e033d0efef82cc1055c416248b6fa0b844b8f
+--- /dev/null
++++ b/GalaxyBudsClient/Platform/BluetoothImpl.AudioOutput.cs
+@@ -0,0 +1,82 @@
++#if OSX
++using System;
++using System.Linq;
++using System.Threading;
++using Avalonia.Threading;
++using GalaxyBudsClient.Message;
++using GalaxyBudsClient.Model.Config;
++using GalaxyBudsClient.Model.Constants;
++using Serilog;
++
++namespace GalaxyBudsClient.Platform;
++
++public sealed partial class BluetoothImpl
++{
++    private readonly DispatcherTimer _audioOutputTimer = new() { Interval = TimeSpan.FromSeconds(1) };
++    private string? _observedMacAudioAddress;
++    private bool _followedObservedOutput;
++    private int _connectRequests;
++
++    private async void FollowMacAudioOutput(object? sender, EventArgs args)
++    {
++        if (!Settings.Data.FollowMacAudioOutput)
++        {
++            _observedMacAudioAddress = null;
++            _followedObservedOutput = false;
++            return;
++        }
++
++        var address = OSX.BudsOnAudioRoute.GetDefaultBluetoothAddress();
++        if (address != _observedMacAudioAddress)
++        {
++            _observedMacAudioAddress = address;
++            _followedObservedOutput = false;
++            return;
++        }
++
++        if (address is null || _followedObservedOutput || _backend is not OSX.BluetoothService backend ||
++            Volatile.Read(ref _connectRequests) != 0 || AlternativeModeEnabled || SuppressDisconnectionEvents)
++            return;
++
++        var output = Settings.Data.Devices.FirstOrDefault(device => device.Model != Models.NULL &&
++            string.Equals(device.MacAddress.Replace('-', ':'), address, StringComparison.OrdinalIgnoreCase));
++        if (output is null)
++            return;
++        if (ReferenceEquals(output, Device.Current))
++        {
++            _followedObservedOutput = IsConnected;
++            return;
++        }
++        if (IsConnected || backend.IsStreamConnected ||
++            (Device.Current is { Model: Models.BudsOn } previous && GetBudsOnHandoffStatus(previous) != (0UL, false)))
++            return;
++
++        // Let the last connection's receive loop finish before changing the model used for decoding.
++        if (!Monitor.TryEnter(IncomingQueue))
++            return;
++        try
++        {
++            if (!backend.StopReconnectIfIdle())
++                return;
++            IncomingQueue.Clear();
++            _incomingData.Clear();
++            DeviceMessageCache.Instance.Clear();
++        }
++        finally
++        {
++            Monitor.Exit(IncomingQueue);
++        }
++
++        _followedObservedOutput = true;
++        Device.Current = output;
++        try
++        {
++            await ConnectAsync(output);
++        }
++        catch (Exception ex)
++        {
++            Log.Warning(ex, "Unable to follow the Mac audio output");
++        }
++    }
++}
++#endif
+diff --git a/GalaxyBudsClient/Platform/BluetoothImpl.cs b/GalaxyBudsClient/Platform/BluetoothImpl.cs
+index 384d5dcf02b1f7adea35d11c31985ca31947eb2d..a24802d4dac5d902c829ae9daa3511b9d35d169a 100644
+--- a/GalaxyBudsClient/Platform/BluetoothImpl.cs
++++ b/GalaxyBudsClient/Platform/BluetoothImpl.cs
+@@ -120,6 +120,11 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+         _backend = backend;
+ #if OSX
+         Device.DeviceChanged += OnHandoffDeviceChanged;
++        if (backend is OSX.BluetoothService)
++        {
++            _audioOutputTimer.Tick += FollowMacAudioOutput;
++            _audioOutputTimer.Start();
++        }
+ #endif
+         _loop = Task.Run(DataConsumerLoop, _loopCancelSource.Token);
+             
+@@ -166,6 +171,7 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+     public async void Dispose()
+     {
+ #if OSX
++        _audioOutputTimer.Stop();
+         Device.DeviceChanged -= OnHandoffDeviceChanged;
+         lock (_handoffLock)
+             _handoffDisposed = true;
+@@ -289,6 +295,9 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+         if (device.Model == Models.BudsOn && alternative)
+             return false;
+ 
++#if OSX
++        Interlocked.Increment(ref _connectRequests);
++#endif
+         /* Load from configuration */
+         try
+         {
+@@ -300,7 +309,12 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+                 throw new BluetoothException(BluetoothException.ErrorCodes.UnsupportedDevice,
+                     "BluetoothImpl: Connection attempt without valid UUID (alt mode enabled but UUID unset?)");
+             }
+-            DeviceName = await GetDeviceNameAsync();
++            var deviceName = await GetDeviceNameAsync();
++#if OSX
++            if (!ReferenceEquals(Device.Current, device))
++                return false;
++#endif
++            DeviceName = deviceName;
+             device.Name = DeviceName;
+                         
+ #if OSX
+@@ -335,6 +349,12 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+             Log.Warning("BluetoothImpl: Connection task cancelled");
+             return false;
+         }
++#if OSX
++        finally
++        {
++            Interlocked.Decrement(ref _connectRequests);
++        }
++#endif
+     }
+ 
+     public Task DisconnectAsync(bool alternative = false) => DisconnectCoreAsync(alternative);
+@@ -1072,6 +1092,7 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+         }
+ 
+ #if OSX
++        var connectedDevice = Device.Current;
+         var budsOnDevice = Device.Current is { Model: Models.BudsOn } selected ? selected : null;
+         var budsOnConnection = budsOnDevice == null ? null : BudsOnDiagnostics.GetManagementConnection(budsOnDevice);
+ #endif
+@@ -1079,6 +1100,11 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+         {
+             Dispatcher.UIThread.Post(() =>
+             {
++#if OSX
++                if (_backend is OSX.BluetoothService backend &&
++                    (!ReferenceEquals(Device.Current, connectedDevice) || !backend.IsStreamConnected))
++                    return;
++#endif
+                 if (AlternativeModeEnabled)
+                 {
+                     IsConnectedAlternative = true;
+@@ -1149,9 +1175,14 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+                 {
+                     _incomingData.AddRange(frame);
+                 }
++#if OSX
++                ProcessDataBlock(_incomingData, CurrentModel);
++#endif
+             }
+ 
++#if !OSX
+             ProcessDataBlock(_incomingData, CurrentModel);
++#endif
+         }
+     }
+ 
