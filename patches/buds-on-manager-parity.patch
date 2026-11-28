@@ -1,0 +1,1285 @@
+diff --git a/GalaxyBudsClient/Interface/Pages/AdvancedPage.axaml b/GalaxyBudsClient/Interface/Pages/AdvancedPage.axaml
+index 23c660e4..a25f42f0 100644
+--- a/GalaxyBudsClient/Interface/Pages/AdvancedPage.axaml
++++ b/GalaxyBudsClient/Interface/Pages/AdvancedPage.axaml
+@@ -26,7 +26,8 @@
+                     <ext:RequiresConnectedDeviceBehavior />
+                 </Interaction.Behaviors>
+                 
+-                <controls:SettingsSwitchItem Content="{ext:Translate {x:Static i18N:Keys.AdvResumePlayback}}"
++                <controls:SettingsSwitchItem x:Name="DesktopResumePlayback"
++                                             Content="{ext:Translate {x:Static i18N:Keys.AdvResumePlayback}}"
+                                              Description="{ext:Translate {x:Static i18N:Keys.AdvResumePlaybackDesc}}"
+                                              IsChecked="{Binding ResumePlaybackOnSensor, Source={x:Static config:Settings.Data}}"
+                                              Symbol="FlashPlay"
+@@ -36,7 +37,8 @@
+                     </Interaction.Behaviors>
+                 </controls:SettingsSwitchItem>
+ 
+-                <controls:SettingsSwitchItem Content="{ext:Translate {x:Static i18N:Keys.AdvPausePlayback}}"
++                <controls:SettingsSwitchItem x:Name="DesktopPausePlayback"
++                                             Content="{ext:Translate {x:Static i18N:Keys.AdvPausePlayback}}"
+                                              Description="{ext:Translate {x:Static i18N:Keys.AdvPausePlaybackDesc}}"
+                                              IsChecked="{Binding PausePlaybackOnSensor, Source={x:Static config:Settings.Data}}"
+                                              Symbol="{x:Static icons:Symbol.Pause}"
+@@ -99,6 +101,22 @@
+                 </controls:SettingsSwitchItem>
+             </controls:SettingsGroup>
+ 
++            <StackPanel x:Name="BudsOnPlaybackSettings" Spacing="8" IsVisible="False">
++                <controls:SettingsGroup>
++                    <controls:SettingsSwitchItem x:Name="BudsOnGamingMode"
++                                                 Content="Gaming mode"
++                                                 Symbol="Games" />
++                    <controls:SettingsSwitchItem x:Name="BudsOnPauseOnRemoval"
++                                                 Content="Pause when one earbud is removed"
++                                                 Symbol="PauseCircle" />
++                </controls:SettingsGroup>
++                <Button x:Name="BudsOnRefreshPlaybackStatus"
++                        Content="Refresh status"
++                        ToolTip.Tip="Reconnects the earbud control channel."
++                        Click="OnRefreshBudsOnPlaybackStatus" />
++                <TextBlock x:Name="BudsOnPlaybackResult" IsVisible="False" TextWrapping="Wrap" />
++            </StackPanel>
++
+             <controls:SettingsGroup>
+                 <controls:SettingsSymbolItem Name="Hotkey"
+                                              Content="{ext:Translate {x:Static i18N:Keys.AdvHotkey}}"
+diff --git a/GalaxyBudsClient/Interface/Pages/AdvancedPage.axaml.cs b/GalaxyBudsClient/Interface/Pages/AdvancedPage.axaml.cs
+index 789f2d3f..48848d36 100644
+--- a/GalaxyBudsClient/Interface/Pages/AdvancedPage.axaml.cs
++++ b/GalaxyBudsClient/Interface/Pages/AdvancedPage.axaml.cs
+@@ -1,19 +1,161 @@
++using System;
+ using System.Linq;
++using System.Threading.Tasks;
++using Avalonia;
+ using Avalonia.Interactivity;
++using Avalonia.Threading;
+ using FluentAvalonia.UI.Controls;
++using GalaxyBudsClient.Interface.Controls;
+ using GalaxyBudsClient.Interface.Services;
+ using GalaxyBudsClient.Interface.ViewModels.Pages;
++using GalaxyBudsClient.Model.Config;
++using GalaxyBudsClient.Model.Constants;
++using GalaxyBudsClient.Platform;
+ 
+ namespace GalaxyBudsClient.Interface.Pages;
+ 
+ public partial class AdvancedPage : BasePage<AdvancedPageViewModel>
+ {
+     private readonly string[] _restrictedItems = ["Rename"];
++    private readonly DispatcherTimer _budsOnPlaybackTimer = new() { Interval = TimeSpan.FromSeconds(1) };
++    private Device? _budsOnPlaybackDevice;
++    private bool _syncingBudsOnPlayback;
++    private bool _budsOnPlaybackBusy;
+     
+     public AdvancedPage()
+     {
+         InitializeComponent();
+         AddHandler(FASettingsExpanderItem.ClickEvent, OnSettingsItemClicked);
++        if (!PlatformUtils.IsOSX)
++            return;
++
++        BudsOnGamingMode.PropertyChanged += (_, e) =>
++            OnBudsOnPlaybackSwitchChanged(e, BudsOnGamingMode, BudsOnDiagnostics.Option.GamingMode);
++        BudsOnPauseOnRemoval.PropertyChanged += (_, e) =>
++            OnBudsOnPlaybackSwitchChanged(e, BudsOnPauseOnRemoval, BudsOnDiagnostics.Option.PauseOnRemoval);
++        _budsOnPlaybackTimer.Tick += (_, _) => RefreshBudsOnPlaybackControls();
++        AttachedToVisualTree += (_, _) =>
++        {
++            _budsOnPlaybackTimer.Start();
++            RefreshBudsOnPlaybackControls();
++        };
++        DetachedFromVisualTree += (_, _) => _budsOnPlaybackTimer.Stop();
++    }
++
++    private void RefreshBudsOnPlaybackControls()
++    {
++        var bluetooth = BluetoothImpl.Instance;
++        var device = bluetooth.Device.Current is { Model: Models.BudsOn } budsOn ? budsOn : null;
++
++        BudsOnPlaybackSettings.IsVisible = device is not null;
++        // These desktop-wide actions use legacy wear events, which Buds On does not supply.
++        DesktopResumePlayback.IsVisible = device is null;
++        DesktopPausePlayback.IsVisible = device is null;
++        if (!ReferenceEquals(_budsOnPlaybackDevice, device))
++        {
++            _budsOnPlaybackDevice = device;
++            ShowBudsOnPlaybackResult(null);
++        }
++
++        if (device is null)
++            return;
++
++        var connected = CanUseBudsOnPlaybackControls(device);
++        _syncingBudsOnPlayback = true;
++        try
++        {
++            RefreshBudsOnPlaybackSwitch(BudsOnGamingMode, device, BudsOnDiagnostics.Option.GamingMode, connected);
++            RefreshBudsOnPlaybackSwitch(BudsOnPauseOnRemoval, device, BudsOnDiagnostics.Option.PauseOnRemoval, connected);
++            BudsOnRefreshPlaybackStatus.IsEnabled = connected && !_budsOnPlaybackBusy;
++        }
++        finally
++        {
++            _syncingBudsOnPlayback = false;
++        }
++    }
++
++    private static bool CanUseBudsOnPlaybackControls(Device device)
++    {
++        var bluetooth = BluetoothImpl.Instance;
++        return bluetooth.IsBudsOnSettingsDevice(device) && !bluetooth.GetBudsOnHandoffStatus(device).Starting;
++    }
++
++    private void RefreshBudsOnPlaybackSwitch(SettingsSwitchItem control, Device device,
++        BudsOnDiagnostics.Option option, bool connected)
++    {
++        var value = connected ? BudsOnDiagnostics.GetControlValue(device, option) : null;
++        var hasFreshSample = connected && BudsOnDiagnostics.GetOptionSample(device, option) is not null;
++        var readOnly = BluetoothImpl.Instance.BudsOnReadOnly;
++        control.IsChecked = value;
++        control.IsEnabled = hasFreshSample && !_budsOnPlaybackBusy && !readOnly;
++        control.Description = (value, hasFreshSample, readOnly) switch
++        {
++            (null, _, _) => "Experimental · Unavailable",
++            (_, false, _) => "Experimental · Last reported. Refresh status to make changes.",
++            (_, true, true) => "Experimental · Read-only diagnostics",
++            _ => "Experimental"
++        };
++    }
++
++    private async void OnBudsOnPlaybackSwitchChanged(AvaloniaPropertyChangedEventArgs change,
++        SettingsSwitchItem control, BudsOnDiagnostics.Option option)
++    {
++        if (_syncingBudsOnPlayback || change.Property != SettingsSwitchItem.IsCheckedProperty)
++            return;
++
++        var bluetooth = BluetoothImpl.Instance;
++        if (control.IsChecked is not { } desired ||
++            _budsOnPlaybackDevice is not { } device || !_budsOnPlaybackTimer.IsEnabled ||
++            _budsOnPlaybackBusy || bluetooth.BudsOnReadOnly || !control.IsEnabled ||
++            !CanUseBudsOnPlaybackControls(device) ||
++            BudsOnDiagnostics.GetOptionSample(device, option) is not { } sample || sample.CurrentValue == desired)
++        {
++            RefreshBudsOnPlaybackControls();
++            return;
++        }
++
++        await RunBudsOnPlaybackActionAsync(device, "Applying change…",
++            () => bluetooth.SetBudsOnOptionAsync(device, option, desired));
++    }
++
++    private async void OnRefreshBudsOnPlaybackStatus(object? sender, RoutedEventArgs e)
++    {
++        if (_budsOnPlaybackDevice is not { } device || !_budsOnPlaybackTimer.IsEnabled ||
++            _budsOnPlaybackBusy || !CanUseBudsOnPlaybackControls(device))
++            return;
++
++        await RunBudsOnPlaybackActionAsync(device, "Refreshing status…", async () =>
++            await BluetoothImpl.Instance.RefreshBudsOnStatusAsync(device) ?? "Earbud status refreshed.");
++    }
++
++    private async Task RunBudsOnPlaybackActionAsync(Device device, string progress, Func<Task<string>> action)
++    {
++        _budsOnPlaybackBusy = true;
++        ShowBudsOnPlaybackResult(progress);
++        RefreshBudsOnPlaybackControls();
++        try
++        {
++            var result = await action();
++            if (ReferenceEquals(BluetoothImpl.Instance.Device.Current, device))
++                ShowBudsOnPlaybackResult(result);
++        }
++        catch (Exception ex)
++        {
++            Serilog.Log.Warning(ex, "Buds On playback setting operation failed");
++            if (ReferenceEquals(BluetoothImpl.Instance.Device.Current, device))
++                ShowBudsOnPlaybackResult("The operation was interrupted. Refresh status before trying again.");
++        }
++        finally
++        {
++            _budsOnPlaybackBusy = false;
++            RefreshBudsOnPlaybackControls();
++        }
++    }
++
++    private void ShowBudsOnPlaybackResult(string? result)
++    {
++        BudsOnPlaybackResult.Text = result;
++        BudsOnPlaybackResult.IsVisible = !string.IsNullOrEmpty(result);
+     }
+ 
+     private async void OnSettingsItemClicked(object? sender, RoutedEventArgs e)
+diff --git a/GalaxyBudsClient/Interface/Pages/SettingsPage.axaml b/GalaxyBudsClient/Interface/Pages/SettingsPage.axaml
+index 85d00983..c9f6cdc4 100644
+--- a/GalaxyBudsClient/Interface/Pages/SettingsPage.axaml
++++ b/GalaxyBudsClient/Interface/Pages/SettingsPage.axaml
+@@ -204,59 +204,6 @@
+             </ui:FASettingsExpander>
+ 
+ 
+-            <ui:FASettingsExpander x:Name="BudsOnAudioPanel" Header="Galaxy Buds On"
+-                                   IsExpanded="True" IsVisible="False">
+-                <StackPanel Spacing="8">
+-                    <CheckBox x:Name="BudsOnReadOnlyToggle" Content="Read-only diagnostics"
+-                              Click="OnBudsOnReadOnlyClicked" />
+-                    <controls:SettingsGroup>
+-                        <controls:SettingsSymbolItem Content="Gaming mode" Description="Experimental"
+-                                                     Symbol="DeviceEq">
+-                            <controls:SettingsSymbolItem.Footer>
+-                                <Button x:Name="BudsOnGamingButton" Click="OnBudsOnGamingClicked" />
+-                            </controls:SettingsSymbolItem.Footer>
+-                        </controls:SettingsSymbolItem>
+-                        <controls:SettingsSymbolItem Content="Pause when one earbud is removed"
+-                                                     Description="Experimental" Symbol="VideoPlayPause">
+-                            <controls:SettingsSymbolItem.Footer>
+-                                <Button x:Name="BudsOnPauseButton" Click="OnBudsOnPauseClicked" />
+-                            </controls:SettingsSymbolItem.Footer>
+-                        </controls:SettingsSymbolItem>
+-                    </controls:SettingsGroup>
+-                    <TextBlock x:Name="BudsOnAudioResult" TextWrapping="Wrap" IsVisible="False" />
+-                    <Button x:Name="BudsOnRefreshButton" Content="Refresh Buds On status"
+-                            Click="OnBudsOnRefreshClicked" />
+-                </StackPanel>
+-            </ui:FASettingsExpander>
+-
+-            <ui:FASettingsExpander x:Name="BudsOnHandoffPanel" Header="Experimental Mac audio handoff"
+-                                   IsExpanded="True" IsVisible="False">
+-                <ui:FASettingsExpander.IconSource>
+-                    <ic:SymbolIconSource Symbol="LinkMultiple" />
+-                </ui:FASettingsExpander.IconSource>
+-                <StackPanel Spacing="8">
+-                    <TextBlock Text="Start with Mac audio playing through the Buds. This sends the Galaxy Book setup message once and holds the Samsung control channel open for your test."
+-                               TextWrapping="Wrap" />
+-                    <TextBlock x:Name="BudsOnHandoffAvailability"
+-                               TextWrapping="Wrap" IsVisible="False" />
+-                    <controls:SettingsSymbolItem Content="Samsung control channel" Symbol="BluetoothConnected">
+-                        <controls:SettingsSymbolItem.Footer>
+-                            <StackPanel Orientation="Horizontal">
+-                                <Button x:Name="BudsOnHandoffStart" Content="Send setup once"
+-                                        Click="OnHandoffStart" IsEnabled="False" />
+-                                <Button x:Name="BudsOnHandoffEnd" Content="End handoff session"
+-                                        Click="OnHandoffEnd" IsVisible="False" />
+-                            </StackPanel>
+-                        </controls:SettingsSymbolItem.Footer>
+-                    </controls:SettingsSymbolItem>
+-                    <TextBlock x:Name="BudsOnHandoffStatus" TextWrapping="Wrap" IsVisible="False" />
+-                </StackPanel>
+-            </ui:FASettingsExpander>
+-
+-            <Button Content="Copy Buds On connection report"
+-                    IsVisible="{x:Static platform:PlatformUtils.IsOSX}"
+-                    Click="OnCopyBudsOnReportClicked" />
+-
+             <ui:FASettingsExpander Header="{ext:Translate {x:Static i18N:Keys.SettingsMultipointHeader}}"
+                                  IsVisible="{Binding IsMultipointSupported}">
+                 <ui:FASettingsExpander.IconSource>
+@@ -264,13 +211,13 @@
+                 </ui:FASettingsExpander.IconSource>
+ 
+                 <controls:SettingsSwitchItem
+-                    Content="{ext:Translate {x:Static i18N:Keys.SettingsMultipointAuto}}"
+-                    Description="{ext:Translate {x:Static i18N:Keys.SettingsMultipointAutoDescription}}"
++                    Content="{Binding MultipointAutoTitle}"
++                    Description="{Binding MultipointAutoDescription}"
+                     Symbol="BluetoothConnected"
+-                    IsChecked="{Binding AutoEnableMultipoint, Source={x:Static config:Settings.Data}}" />
++                    IsChecked="{Binding AutoMultipointEnabled, Mode=TwoWay}" />
+ 
+                 <controls:SettingsSymbolItem Content="{ext:Translate {x:Static i18N:Keys.SettingsMultipointApply}}"
+-                                             Description="{ext:Translate {x:Static i18N:Keys.SettingsMultipointApplyDescription}}"
++                                             Description="{Binding MultipointApplyDescription}"
+                                              Symbol="Flash"
+                                              IsClickEnabled="True"
+                                              IsEnabled="{Binding CanApplyMultipoint}"
+@@ -323,6 +270,18 @@
+                                              Description="{StaticResource TranslatorCreditsString}" />
+             </ui:FASettingsExpander>
+ 
++            <ui:FASettingsExpander Header="Buds On diagnostics"
++                                 IsVisible="{Binding IsBudsOnSelected}">
++                <ui:FASettingsExpander.IconSource>
++                    <ic:SymbolIconSource Symbol="Bug" />
++                </ui:FASettingsExpander.IconSource>
++                <controls:SettingsSwitchItem Content="Read-only diagnostics"
++                                             IsChecked="{Binding BudsOnReadOnly, Mode=TwoWay}" />
++                <controls:SettingsSymbolItem Content="Copy connection report"
++                                             IsClickEnabled="True"
++                                             Click="OnCopyBudsOnReportClicked" />
++            </ui:FASettingsExpander>
++
+             <ui:FASettingsExpander Name="DevSettings"
+                                  Header="{ext:Translate {x:Static i18N:Keys.SettingsDevmode}}"
+                                  Description="{ext:Translate {x:Static i18N:Keys.SettingsDevmodeDescription}}"
+diff --git a/GalaxyBudsClient/Interface/Pages/SettingsPage.axaml.cs b/GalaxyBudsClient/Interface/Pages/SettingsPage.axaml.cs
+index 0230a645..23a5da8c 100644
+--- a/GalaxyBudsClient/Interface/Pages/SettingsPage.axaml.cs
++++ b/GalaxyBudsClient/Interface/Pages/SettingsPage.axaml.cs
+@@ -1,10 +1,8 @@
+ using System;
+-using System.Threading.Tasks;
+ using Avalonia.Controls;
+ using Avalonia.Input.Platform;
+ using Avalonia.Interactivity;
+ using Avalonia.Threading;
+-using GalaxyBudsClient.Model.Config;
+ using GalaxyBudsClient.Model.Constants;
+ using FluentAvalonia.UI.Controls;
+ using GalaxyBudsClient.Generated.I18N;
+@@ -25,178 +23,17 @@ public partial class SettingsPage : BasePage<SettingsPageViewModel>
+         TrayIcon.AddHandler(SettingsSwitchItem.IsCheckedChangedEvent, OnIsTrayIconEnabledChanged);
+         if (PlatformUtils.IsOSX)
+         {
+-            _budsOnSettingsTimer.Tick += (_, _) => RefreshBudsOnAudioControls();
++            _multipointTimer.Tick += (_, _) => ViewModel?.RefreshBudsOnMultipointState();
+             AttachedToVisualTree += (_, _) =>
+             {
+-                _budsOnSettingsTimer.Start();
+-                RefreshBudsOnAudioControls();
++                ViewModel?.RefreshMultipointState();
++                _multipointTimer.Start();
+             };
+-            DetachedFromVisualTree += (_, _) => _budsOnSettingsTimer.Stop();
++            DetachedFromVisualTree += (_, _) => _multipointTimer.Stop();
+         }
+     }
+ 
+-    private readonly DispatcherTimer _budsOnSettingsTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+-    private Device? _budsOnAudioDevice;
+-    private bool _budsOnAudioBusy;
+-
+-    private void RefreshBudsOnAudioControls()
+-    {
+-        var bluetooth = BluetoothImpl.Instance;
+-        var device = bluetooth.Device.Current;
+-        BudsOnAudioPanel.IsVisible = PlatformUtils.IsOSX && device?.Model == Models.BudsOn;
+-        BudsOnHandoffPanel.IsVisible = BudsOnAudioPanel.IsVisible;
+-        if (!ReferenceEquals(_budsOnAudioDevice, device))
+-        {
+-            _budsOnHandoffTicket = 0;
+-            ShowHandoffStatus(null);
+-            _budsOnAudioDevice = device;
+-            BudsOnAudioResult.IsVisible = false;
+-        }
+-
+-        BudsOnReadOnlyToggle.IsChecked = bluetooth.BudsOnReadOnly;
+-        var connected = device != null && bluetooth.IsBudsOnSettingsDevice(device);
+-        RefreshHandoffControls(device, connected, bluetooth.BudsOnReadOnly);
+-        BudsOnRefreshButton.IsEnabled = connected && !_budsOnAudioBusy && !_budsOnHandoffStarting;
+-        RefreshBudsOnAudioButton(BudsOnGamingButton, connected ? device : null, BudsOnDiagnostics.Option.GamingMode);
+-        RefreshBudsOnAudioButton(BudsOnPauseButton, connected ? device : null, BudsOnDiagnostics.Option.PauseOnRemoval);
+-    }
+-
+-    private void RefreshBudsOnAudioButton(Button button, Device? device, BudsOnDiagnostics.Option option)
+-    {
+-        var value = device != null ? BudsOnDiagnostics.GetControlValue(device, option) : null;
+-        var canSend = device != null && BudsOnDiagnostics.GetOptionSample(device, option) != null;
+-        button.Content = value switch
+-        {
+-            true => canSend ? "On · Turn off" : "On · Last reported",
+-            false => canSend ? "Off · Turn on" : "Off · Last reported",
+-            _ => "Unavailable"
+-        };
+-        button.CommandParameter = value.HasValue ? (bool?)!value.Value : null;
+-        button.IsEnabled = canSend && !_budsOnAudioBusy && !_budsOnHandoffStarting &&
+-                           !BluetoothImpl.Instance.BudsOnReadOnly;
+-    }
+-
+-    private void OnBudsOnReadOnlyClicked(object? sender, RoutedEventArgs e)
+-    {
+-        BluetoothImpl.Instance.BudsOnReadOnly = BudsOnReadOnlyToggle.IsChecked == true;
+-        RefreshBudsOnAudioControls();
+-    }
+-
+-    private async void OnBudsOnGamingClicked(object? sender, RoutedEventArgs e)
+-    {
+-        if (BudsOnGamingButton.CommandParameter is bool desired)
+-            await RunBudsOnAudioAction(device =>
+-                BluetoothImpl.Instance.SetBudsOnOptionAsync(device, BudsOnDiagnostics.Option.GamingMode, desired));
+-    }
+-
+-    private async void OnBudsOnPauseClicked(object? sender, RoutedEventArgs e)
+-    {
+-        if (BudsOnPauseButton.CommandParameter is bool desired)
+-            await RunBudsOnAudioAction(device =>
+-                BluetoothImpl.Instance.SetBudsOnOptionAsync(device, BudsOnDiagnostics.Option.PauseOnRemoval, desired));
+-    }
+-
+-    private async void OnBudsOnRefreshClicked(object? sender, RoutedEventArgs e) =>
+-        await RunBudsOnAudioAction(async device =>
+-            await BluetoothImpl.Instance.RefreshBudsOnStatusAsync(device) ?? "Earbud status refreshed.");
+-
+-    private async Task RunBudsOnAudioAction(Func<Device, Task<string>> action)
+-    {
+-        var bluetooth = BluetoothImpl.Instance;
+-        var device = bluetooth.Device.Current;
+-        if (_budsOnAudioBusy || _budsOnHandoffStarting || device == null || !bluetooth.IsBudsOnSettingsDevice(device))
+-            return;
+-
+-        _budsOnAudioBusy = true;
+-        BudsOnAudioResult.Text = "Checking earbuds…";
+-        BudsOnAudioResult.IsVisible = true;
+-        RefreshBudsOnAudioControls();
+-        try
+-        {
+-            BudsOnAudioResult.Text = await action(device);
+-        }
+-        catch (Exception ex)
+-        {
+-            Serilog.Log.Warning(ex, "Buds On audio settings operation failed");
+-            BudsOnAudioResult.Text = "The operation was interrupted. Check the current setting.";
+-        }
+-        finally
+-        {
+-            _budsOnAudioBusy = false;
+-            RefreshBudsOnAudioControls();
+-        }
+-    }
+-
+-    private bool _budsOnHandoffStarting;
+-    private ulong _budsOnHandoffTicket;
+-
+-    private void ShowHandoffStatus(string? text)
+-    {
+-        BudsOnHandoffStatus.Text = text;
+-        BudsOnHandoffStatus.IsVisible = !string.IsNullOrEmpty(text);
+-    }
+-
+-    private void RefreshHandoffControls(Device? device, bool connected, bool readOnly)
+-    {
+-        var (ticket, starting) = device == null
+-            ? (0UL, false)
+-            : BluetoothImpl.Instance.GetBudsOnHandoffStatus(device);
+-        var holding = ticket != 0;
+-        if (holding && ticket != _budsOnHandoffTicket)
+-            ShowHandoffStatus("macOS completed one setup write and is holding the Samsung control channel open. Reconnect the Fold once, then try audio on both devices.");
+-        else if (!holding && _budsOnHandoffTicket != 0)
+-            ShowHandoffStatus("The Samsung control channel closed.");
+-        _budsOnHandoffTicket = ticket;
+-
+-        BudsOnHandoffAvailability.Text = readOnly
+-            ? "Read-only diagnostics is on."
+-            : "Connect your Buds On in Galaxy Buds Manager to start.";
+-        BudsOnHandoffAvailability.IsVisible = !holding && (readOnly || !connected);
+-        BudsOnHandoffStart.IsVisible = !holding;
+-        BudsOnHandoffStart.IsEnabled = _budsOnSettingsTimer.IsEnabled && connected &&
+-                                       !readOnly && !_budsOnAudioBusy && !_budsOnHandoffStarting && !starting;
+-        BudsOnHandoffEnd.IsVisible = holding;
+-    }
+-
+-    private async void OnHandoffStart(object? sender, RoutedEventArgs e)
+-    {
+-        RefreshBudsOnAudioControls();
+-        var bluetooth = BluetoothImpl.Instance;
+-        if (!BudsOnHandoffStart.IsVisible || !BudsOnHandoffStart.IsEnabled || bluetooth.Device.Current is not { } device)
+-            return;
+-
+-        _budsOnHandoffStarting = true;
+-        ShowHandoffStatus("Opening the Samsung control channel and sending setup…");
+-        RefreshBudsOnAudioControls();
+-        string message;
+-        try
+-        {
+-            message = await bluetooth.StartBudsOnHandoffAsync(device);
+-        }
+-        catch (Exception ex)
+-        {
+-            Serilog.Log.Warning(ex, "Buds On host setup was interrupted");
+-            message = "The Mac could not confirm the setup result. Check where audio is playing.";
+-        }
+-        finally
+-        {
+-            _budsOnHandoffStarting = false;
+-        }
+-        RefreshBudsOnAudioControls();
+-        if (_budsOnHandoffTicket == 0 && ReferenceEquals(bluetooth.Device.Current, device))
+-            ShowHandoffStatus(message);
+-    }
+-
+-    private void OnHandoffEnd(object? sender, RoutedEventArgs e)
+-    {
+-        if (_budsOnHandoffTicket == 0)
+-            return;
+-        BluetoothImpl.Instance.CloseBudsOnHandoff(_budsOnHandoffTicket);
+-        _budsOnHandoffTicket = 0;
+-        BudsOnDiagnostics.Record("Buds On handoff ended in Settings.");
+-        ShowHandoffStatus("Handoff session ended.");
+-        RefreshBudsOnAudioControls();
+-    }
++    private readonly DispatcherTimer _multipointTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+ 
+     private void OnIsTrayIconEnabledChanged(object? sender, RoutedEventArgs e)
+     {
+@@ -233,17 +70,46 @@ public partial class SettingsPage : BasePage<SettingsPageViewModel>
+ 
+     public async void OnApplyMultipointClicked(object? sender, RoutedEventArgs e)
+     {
+-        /* The sequence disconnects and reconnects the earbuds, so keep it from being started twice */
+-        if (ViewModel != null)
+-            ViewModel.CanApplyMultipoint = false;
++        if (ViewModel is not { CanApplyMultipoint: true } viewModel)
++            return;
+ 
+-        var success = await MultipointPatcher.ApplyAsync();
+-        ViewModel?.RefreshMultipointState();
++        var bluetooth = BluetoothImpl.Instance;
++        var device = bluetooth.Device.Current;
++        if (device == null)
++            return;
+ 
+-        await new MessageBox
++        viewModel.SetApplyingMultipoint(true);
++        try
+         {
+-            Title = Strings.SettingsMultipointHeader,
+-            Description = success ? Strings.SettingsMultipointApplied : Strings.SettingsMultipointFailed
+-        }.ShowAsync();
++            var result = device.Model == Models.BudsOn && PlatformUtils.IsOSX
++                ? await bluetooth.ApplyBudsOnMultipointAsync(device)
++                : await MultipointPatcher.ApplyAsync()
++                    ? Strings.SettingsMultipointApplied
++                    : Strings.SettingsMultipointFailed;
++            if (ReferenceEquals(bluetooth.Device.Current, device) && TopLevel.GetTopLevel(this) != null)
++            {
++                await new MessageBox
++                {
++                    Title = Strings.SettingsMultipointHeader,
++                    Description = result
++                }.ShowAsync();
++            }
++        }
++        catch (Exception ex)
++        {
++            Serilog.Log.Warning(ex, "Applying multipoint failed");
++            if (ReferenceEquals(bluetooth.Device.Current, device) && TopLevel.GetTopLevel(this) != null)
++            {
++                await new MessageBox
++                {
++                    Title = Strings.SettingsMultipointHeader,
++                    Description = Strings.SettingsMultipointFailed
++                }.ShowAsync();
++            }
++        }
++        finally
++        {
++            viewModel.SetApplyingMultipoint(false);
++        }
+     }
+ }
+diff --git a/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml b/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml
+index a07d9168..e10442a5 100644
+--- a/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml
++++ b/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml
+@@ -26,6 +26,26 @@
+             </Interaction.Behaviors>
+ 
+             <StackPanel IsVisible="{Binding IsBudsOnTouchpad}" Spacing="8">
++                <controls:SettingsGroup IsEnabled="{Binding !IsBudsOnTouchpadBusy}">
++                    <controls:SettingsComboBoxItem
++                        Content="{ext:Translate {x:Static i18N:Keys.TouchpadLeftAction}}"
++                        Description="{Binding BudsOnLeftHoldVolume.HoldDescription}"
++                        Symbol="ArrowStepInLeft"
++                        ItemsSource="{Binding BudsOnHoldActions}"
++                        DisplayMemberBinding="{Binding}"
++                        SelectedValue="{Binding BudsOnLeftHoldVolume.HoldAction, Mode=OneWay}"
++                        IsEnabled="{Binding BudsOnLeftHoldVolume.CanChange}"
++                        SelectionChanged="OnBudsOnLeftHoldSelectionChanged" />
++                    <controls:SettingsComboBoxItem
++                        Content="{ext:Translate {x:Static i18N:Keys.TouchpadRightAction}}"
++                        Description="{Binding BudsOnRightHoldVolume.HoldDescription}"
++                        Symbol="ArrowStepInRight"
++                        ItemsSource="{Binding BudsOnHoldActions}"
++                        DisplayMemberBinding="{Binding}"
++                        SelectedValue="{Binding BudsOnRightHoldVolume.HoldAction, Mode=OneWay}"
++                        IsEnabled="{Binding BudsOnRightHoldVolume.CanChange}"
++                        SelectionChanged="OnBudsOnRightHoldSelectionChanged" />
++                </controls:SettingsGroup>
+                 <controls:SettingsGroup IsEnabled="{Binding !IsBudsOnTouchpadBusy}">
+                     <controls:SettingsSwitchItem
+                         Content="Media controls"
+@@ -46,32 +66,6 @@
+                         IsChecked="{Binding IsBudsOnDeclineEnabled, Mode=TwoWay}"
+                         IsEnabled="{Binding BudsOnDecline.CanChange}" />
+                 </controls:SettingsGroup>
+-                <controls:SettingsGroup IsEnabled="{Binding !IsBudsOnTouchpadBusy}">
+-                    <controls:SettingsSymbolItem
+-                        Content="Volume on left hold"
+-                        Description="{Binding BudsOnLeftHoldVolume.Description}"
+-                        Symbol="ArrowStepInLeft">
+-                        <controls:SettingsSymbolItem.Footer>
+-                            <Button Content="{Binding BudsOnLeftHoldVolume.Action}"
+-                                    IsEnabled="{Binding BudsOnLeftHoldVolume.CanChange}"
+-                                    CommandParameter="{Binding BudsOnLeftHoldVolume.DesiredValue}"
+-                                    AutomationProperties.Name="Change Volume on left hold"
+-                                    Click="OnBudsOnLeftHoldVolumeClicked" />
+-                        </controls:SettingsSymbolItem.Footer>
+-                    </controls:SettingsSymbolItem>
+-                    <controls:SettingsSymbolItem
+-                        Content="Volume on right hold"
+-                        Description="{Binding BudsOnRightHoldVolume.Description}"
+-                        Symbol="ArrowStepInRight">
+-                        <controls:SettingsSymbolItem.Footer>
+-                            <Button Content="{Binding BudsOnRightHoldVolume.Action}"
+-                                    IsEnabled="{Binding BudsOnRightHoldVolume.CanChange}"
+-                                    CommandParameter="{Binding BudsOnRightHoldVolume.DesiredValue}"
+-                                    AutomationProperties.Name="Change Volume on right hold"
+-                                    Click="OnBudsOnRightHoldVolumeClicked" />
+-                        </controls:SettingsSymbolItem.Footer>
+-                    </controls:SettingsSymbolItem>
+-                </controls:SettingsGroup>
+                 <Button Content="Refresh status"
+                         IsEnabled="{Binding CanRefreshBudsOnTouchpad}"
+                         Click="OnRefreshBudsOnTouchpadClicked" />
+diff --git a/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml.cs b/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml.cs
+index df632039..8e5295c9 100644
+--- a/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml.cs
++++ b/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml.cs
+@@ -1,7 +1,9 @@
+ using System.Threading.Tasks;
+ using Avalonia.Controls;
+ using Avalonia.Interactivity;
++using Avalonia.Threading;
+ using FluentAvalonia.UI.Controls;
++using GalaxyBudsClient.Interface.Controls;
+ using GalaxyBudsClient.Interface.Dialogs;
+ using GalaxyBudsClient.Interface.ViewModels.Pages;
+ using GalaxyBudsClient.Model;
+@@ -18,61 +20,82 @@ public partial class TouchpadPage : BasePage<TouchpadPageViewModel>
+         InitializeComponent();
+     }
+     
+-    private async void OnBudsOnLeftHoldVolumeClicked(object? sender, RoutedEventArgs e) =>
+-        await SetBudsOnTouchpadOptionAsync(sender, BudsOnDiagnostics.Option.LeftHoldVolume, "left");
++    private async void OnBudsOnLeftHoldSelectionChanged(object? sender, SelectionChangedEventArgs e) =>
++        await SetBudsOnHoldAsync(sender, e, BudsOnDiagnostics.Option.LeftHoldVolume, "left");
+ 
+-    private async void OnBudsOnRightHoldVolumeClicked(object? sender, RoutedEventArgs e) =>
+-        await SetBudsOnTouchpadOptionAsync(sender, BudsOnDiagnostics.Option.RightHoldVolume, "right");
++    private async void OnBudsOnRightHoldSelectionChanged(object? sender, SelectionChangedEventArgs e) =>
++        await SetBudsOnHoldAsync(sender, e, BudsOnDiagnostics.Option.RightHoldVolume, "right");
+ 
+-    private async Task SetBudsOnTouchpadOptionAsync(object? sender, BudsOnDiagnostics.Option option,
+-        string? holdSide = null)
++    private async Task SetBudsOnHoldAsync(object? sender, SelectionChangedEventArgs e,
++        BudsOnDiagnostics.Option option, string side)
+     {
+-        if (sender is not Button { CommandParameter: bool desired } ||
+-            ViewModel is not { IsBudsOnTouchpadBusy: false } viewModel)
++        if (sender is not SettingsComboBoxItem control || e.AddedItems.Count != 1 ||
++            e.AddedItems[0] is not TouchpadPageViewModel.BudsOnHoldAction action ||
++            ViewModel is not { } viewModel)
+             return;
+ 
+-        var bluetooth = BluetoothImpl.Instance;
+-        var device = bluetooth.Device.Current;
+-        if (device == null || !bluetooth.IsBudsOnSettingsDevice(device))
++        var setting = GetBudsOnHoldSetting(viewModel, option);
++        var desired = action.Volume;
++        if (desired == setting.Enabled)
+             return;
+ 
+-        if (BudsOnDiagnostics.GetControlValue(device, option) != !desired)
++        var bluetooth = BluetoothImpl.Instance;
++        var device = bluetooth.Device.Current;
++        if (!control.IsEnabled || viewModel.IsBudsOnTouchpadBusy || !setting.CanChange ||
++            device == null || !bluetooth.IsBudsOnSettingsDevice(device) || bluetooth.BudsOnReadOnly ||
++            BudsOnDiagnostics.GetOptionSample(device, option) is not { } sample || sample.CurrentValue != !desired)
+         {
+-            viewModel.RefreshBudsOnTouchpad();
+-            viewModel.BudsOnTouchpadResult = "Check the current setting and try again.";
++            RestoreBudsOnHoldSelection(control, viewModel, option);
+             return;
+         }
+ 
+         viewModel.IsBudsOnTouchpadBusy = true;
+         try
+         {
+-            if (holdSide is not null)
+-            {
+-                if (TopLevel.GetTopLevel(this) is not { } host)
+-                    return;
++            if (TopLevel.GetTopLevel(this) is not { } host)
++                return;
+ 
+-                var target = desired ? "on" : "off";
+-                var dialog = new FAContentDialog
+-                {
+-                    Title = $"Volume on {holdSide} hold",
+-                    Content = $"This experimental change turns {target} volume control when you hold the {holdSide} earbud. You can reverse it here after the earbuds report the new state.",
+-                    PrimaryButtonText = $"Turn {target}",
+-                    CloseButtonText = "Cancel",
+-                    DefaultButton = FAContentDialogButton.Close
+-                };
+-                if (await dialog.ShowAsync(host) != FAContentDialogResult.Primary)
+-                    return;
+-            }
++            var target = desired ? "on" : "off";
++            var dialog = new FAContentDialog
++            {
++                Title = $"{(side == "left" ? "Left" : "Right")} long-press action",
++                Content = $"Turn {target} volume control when you hold the {side} earbud?",
++                PrimaryButtonText = $"Turn {target}",
++                CloseButtonText = "Cancel",
++                DefaultButton = FAContentDialogButton.Close
++            };
++            if (await dialog.ShowAsync(host) != FAContentDialogResult.Primary ||
++                !bluetooth.IsBudsOnSettingsDevice(device) || bluetooth.BudsOnReadOnly ||
++                BudsOnDiagnostics.GetOptionSample(device, option) != sample)
++                return;
+ 
+             await viewModel.ApplyBudsOnTouchpadOptionAsync(device, option, desired);
+         }
+         finally
+         {
+             viewModel.IsBudsOnTouchpadBusy = false;
+-            viewModel.RefreshBudsOnTouchpad();
++            RestoreBudsOnHoldSelection(control, viewModel, option);
+         }
+     }
+ 
++    private static TouchpadPageViewModel.BudsOnTouchSetting GetBudsOnHoldSetting(
++        TouchpadPageViewModel viewModel, BudsOnDiagnostics.Option option) =>
++        option == BudsOnDiagnostics.Option.LeftHoldVolume
++            ? viewModel.BudsOnLeftHoldVolume
++            : viewModel.BudsOnRightHoldVolume;
++
++    private static void RestoreBudsOnHoldSelection(SettingsComboBoxItem control,
++        TouchpadPageViewModel viewModel, BudsOnDiagnostics.Option option)
++    {
++        // A cancelled or interrupted write leaves the authoritative binding value unchanged.
++        Dispatcher.UIThread.Post(() =>
++        {
++            viewModel.RefreshBudsOnTouchpad();
++            control.SetCurrentValue(SettingsComboBoxItem.SelectedValueProperty,
++                GetBudsOnHoldSetting(viewModel, option).HoldAction);
++        });
++    }
++
+     private async void OnRefreshBudsOnTouchpadClicked(object? sender, RoutedEventArgs e)
+     {
+         if (ViewModel is not { IsBudsOnTouchpadBusy: false } viewModel)
+diff --git a/GalaxyBudsClient/Interface/ViewModels/Pages/SettingsPageViewModel.cs b/GalaxyBudsClient/Interface/ViewModels/Pages/SettingsPageViewModel.cs
+index 26a797c3..f2fe4156 100644
+--- a/GalaxyBudsClient/Interface/ViewModels/Pages/SettingsPageViewModel.cs
++++ b/GalaxyBudsClient/Interface/ViewModels/Pages/SettingsPageViewModel.cs
+@@ -5,19 +5,73 @@ using FluentIcons.Common;
+ using GalaxyBudsClient.Generated.I18N;
+ using GalaxyBudsClient.Interface.Pages;
+ using GalaxyBudsClient.Model.Config;
++using GalaxyBudsClient.Model.Constants;
+ using GalaxyBudsClient.Platform;
++using GalaxyBudsClient.Utils.Interface;
+ using ReactiveUI;
+ 
+ namespace GalaxyBudsClient.Interface.ViewModels.Pages;
+ 
+ public partial class SettingsPageViewModel : MainPageViewModelBase
+ {
++    private Device? _multipointDevice;
++    private bool _applyingMultipoint;
++
++    public bool IsBudsOnSelected => PlatformUtils.IsOSX && _multipointDevice?.Model == Models.BudsOn;
++    public string MultipointAutoTitle => IsBudsOnSelected
++        ? "Enable multipoint automatically" : Strings.SettingsMultipointAuto;
++    public string MultipointAutoDescription => IsBudsOnSelected
++        ? "Set up Mac and phone audio switching each time your earbuds connect."
++        : Strings.SettingsMultipointAutoDescription;
++
++    public bool? AutoMultipointEnabled
++    {
++        get => IsBudsOnSelected ? Settings.Data.AutoEnableBudsOnMultipoint : Settings.Data.AutoEnableMultipoint;
++        set
++        {
++            if (value is not bool enabled || value == AutoMultipointEnabled || !IsMultipointSupported ||
++                !ReferenceEquals(BluetoothImpl.Instance.Device.Current, _multipointDevice))
++                return;
++
++            if (IsBudsOnSelected)
++                BluetoothImpl.Instance.SetAutoEnableBudsOnMultipoint(enabled);
++            else
++                Settings.Data.AutoEnableMultipoint = enabled;
++        }
++    }
++
++    public bool? BudsOnReadOnly
++    {
++        get => BluetoothImpl.Instance.BudsOnReadOnly;
++        set
++        {
++            if (!IsBudsOnSelected || value is not bool enabled || value == BudsOnReadOnly)
++                return;
++
++            BluetoothImpl.Instance.BudsOnReadOnly = enabled;
++            this.RaisePropertyChanged();
++            RefreshBudsOnMultipointState();
++        }
++    }
++
+     public SettingsPageViewModel()
+     {
+         CanManageDevices = BluetoothImpl.HasValidDevice;
+         BluetoothImpl.Instance.Device.DeviceChanged += OnDeviceChanged;
+         BluetoothImpl.Instance.Connected += (_, _) => RefreshMultipointState();
+         BluetoothImpl.Instance.Disconnected += (_, _) => RefreshMultipointState();
++        Settings.MainSettingsPropertyChanged += (_, args) =>
++        {
++            if (args.PropertyName is nameof(SettingsData.AutoEnableMultipoint) or
++                nameof(SettingsData.AutoEnableBudsOnMultipoint))
++                Dispatcher.UIThread.Post(() => this.RaisePropertyChanged(nameof(AutoMultipointEnabled)));
++        };
++        Loc.LanguageUpdated += () =>
++        {
++            this.RaisePropertyChanged(nameof(MultipointAutoTitle));
++            this.RaisePropertyChanged(nameof(MultipointAutoDescription));
++            RefreshMultipointState();
++        };
+         RefreshMultipointState();
+     }
+ 
+@@ -30,10 +84,56 @@ public partial class SettingsPageViewModel : MainPageViewModelBase
+     /* Disconnection events arrive on the Bluetooth backend's thread, so bounce back to the UI thread */
+     public void RefreshMultipointState() => Dispatcher.UIThread.Post(() =>
+     {
+-        IsMultipointSupported = MultipointPatcher.IsSupportedByCurrentDevice;
+-        CanApplyMultipoint = IsMultipointSupported && BluetoothImpl.Instance.IsConnected;
++        var bluetooth = BluetoothImpl.Instance;
++        var device = bluetooth.Device.Current;
++        if (!ReferenceEquals(_multipointDevice, device))
++        {
++            _multipointDevice = device;
++            this.RaisePropertyChanged(nameof(IsBudsOnSelected));
++            this.RaisePropertyChanged(nameof(AutoMultipointEnabled));
++            this.RaisePropertyChanged(nameof(MultipointAutoTitle));
++            this.RaisePropertyChanged(nameof(MultipointAutoDescription));
++        }
++
++        IsMultipointSupported = IsBudsOnSelected || MultipointPatcher.IsSupportedByCurrentDevice;
++        if (IsBudsOnSelected)
++            RefreshBudsOnMultipointState();
++        else
++        {
++            CanApplyMultipoint = !_applyingMultipoint && IsMultipointSupported && bluetooth.IsConnected;
++            MultipointApplyDescription = Strings.SettingsMultipointApplyDescription;
++        }
+     });
+ 
++    internal void RefreshBudsOnMultipointState()
++    {
++        var bluetooth = BluetoothImpl.Instance;
++        var device = _multipointDevice;
++        if (!IsBudsOnSelected || device == null || !ReferenceEquals(bluetooth.Device.Current, device))
++            return;
++
++        var (ticket, starting) = bluetooth.GetBudsOnHandoffStatus(device);
++        CanApplyMultipoint = !_applyingMultipoint && !starting && bluetooth.CanApplyBudsOnMultipoint(device);
++        MultipointApplyDescription = bluetooth.BudsOnReadOnly
++            ? "Turn off read-only diagnostics to apply multipoint."
++            : (starting, ticket != 0, bluetooth.IsBudsOnSettingsDevice(device)) switch
++            {
++                (true, _, _) => "Setting up multipoint…",
++                (_, true, _) => "Multipoint setup is active for this connection.",
++                (_, _, false) => "Connect your earbuds to apply multipoint.",
++                _ => "Set up Mac and phone audio switching on the current connection."
++            };
++    }
++
++    internal void SetApplyingMultipoint(bool applying)
++    {
++        _applyingMultipoint = applying;
++        if (applying)
++            CanApplyMultipoint = false;
++        else
++            RefreshMultipointState();
++    }
++
+     public bool IsAutoStartEnabled
+     {
+         get => PlatformUtils.IsRunningInFlatpak
+@@ -51,6 +151,7 @@ public partial class SettingsPageViewModel : MainPageViewModelBase
+     [Reactive] private object _canManageDevices = false;
+     [Reactive] private bool _isMultipointSupported;
+     [Reactive] private bool _canApplyMultipoint;
++    [Reactive] private string _multipointApplyDescription = Strings.SettingsMultipointApplyDescription;
+     
+     public string CurrentVersion => Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "Unknown";
+     public override Control CreateView() => new SettingsPage { DataContext = this };
+diff --git a/GalaxyBudsClient/Interface/ViewModels/Pages/TouchpadPageViewModel.cs b/GalaxyBudsClient/Interface/ViewModels/Pages/TouchpadPageViewModel.cs
+index 4327eb1d..4ef06f67 100644
+--- a/GalaxyBudsClient/Interface/ViewModels/Pages/TouchpadPageViewModel.cs
++++ b/GalaxyBudsClient/Interface/ViewModels/Pages/TouchpadPageViewModel.cs
+@@ -26,6 +26,13 @@ namespace GalaxyBudsClient.Interface.ViewModels.Pages;
+ 
+ public partial class TouchpadPageViewModel : MainPageViewModelBase
+ {
++    public sealed record BudsOnHoldAction(bool Volume)
++    {
++        public override string ToString() => Volume ? Strings.TouchoptionVolume : Strings.Off;
++    }
++
++    public IReadOnlyList<BudsOnHoldAction> BudsOnHoldActions { get; } = [new(false), new(true)];
++
+     public sealed record BudsOnTouchSetting(bool? Enabled, bool Experimental = false,
+         bool ReadOnly = false, bool CanSend = false)
+     {
+@@ -38,12 +45,13 @@ public partial class TouchpadPageViewModel : MainPageViewModelBase
+             (Enabled.HasValue && !CanSend ? " · Last reported" : "");
+ 
+         public bool CanChange => Enabled.HasValue && CanSend && !ReadOnly;
+-        public bool DesiredValue => Enabled == false;
+-        public string Action => Enabled switch
++        public BudsOnHoldAction? HoldAction => Enabled is { } value ? new(value) : null;
++        public string HoldDescription => (Enabled, CanSend, ReadOnly) switch
+         {
+-            true => "Turn off",
+-            false => "Turn on",
+-            null => "Change"
++            (null, _, _) => "Experimental · Unavailable",
++            (_, false, _) => "Experimental · Last reported. Refresh status to make changes.",
++            (_, true, true) => "Experimental · Read-only diagnostics",
++            _ => "Experimental"
+         };
+     }
+ 
+diff --git a/GalaxyBudsClient/Model/Config/SettingsData.cs b/GalaxyBudsClient/Model/Config/SettingsData.cs
+index 05b8ef26..7fc276d3 100644
+--- a/GalaxyBudsClient/Model/Config/SettingsData.cs
++++ b/GalaxyBudsClient/Model/Config/SettingsData.cs
+@@ -79,6 +79,8 @@ public class SettingsData : ReactiveObject
+     public string? LastDeviceMac { get => _lastDeviceMac; set => this.RaiseAndSetIfChanged(ref _lastDeviceMac, value); }
+     private bool _autoEnableMultipoint;
+     public bool AutoEnableMultipoint { get => _autoEnableMultipoint; set => this.RaiseAndSetIfChanged(ref _autoEnableMultipoint, value); }
++    private bool _autoEnableBudsOnMultipoint;
++    public bool AutoEnableBudsOnMultipoint { get => _autoEnableBudsOnMultipoint; set => this.RaiseAndSetIfChanged(ref _autoEnableBudsOnMultipoint, value); }
+ 
+     
+     /* Touch actions */
+diff --git a/GalaxyBudsClient/Platform/BluetoothImpl.cs b/GalaxyBudsClient/Platform/BluetoothImpl.cs
+index 61c785d5..384d5dcf 100644
+--- a/GalaxyBudsClient/Platform/BluetoothImpl.cs
++++ b/GalaxyBudsClient/Platform/BluetoothImpl.cs
+@@ -310,7 +310,11 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+                 BudsOnDiagnostics.Record("Buds On connection requested");
+                 await macBackend.ConnectAsync(device.MacAddress, uuid, _connectCancelSource.Token,
+                     BudsOnDiagnostics.Record,
+-                    (frame, stamp) => BudsOnDiagnostics.RecordRx(device, frame, stamp),
++                    (frame, stamp) =>
++                    {
++                        BudsOnDiagnostics.RecordRx(device, frame, stamp);
++                        _ = TryEnableBudsOnMultipointAutomaticallyAsync(device);
++                    },
+                     () => BudsOnDiagnostics.ResetReceiveStream(device));
+                 return true;
+             }
+@@ -443,6 +447,33 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+         }
+     }
+ 
++    internal void SetAutoEnableBudsOnMultipoint(bool enabled)
++    {
++        Settings.Data.AutoEnableBudsOnMultipoint = enabled;
++#if OSX
++        if (!enabled)
++        {
++            InvalidateBudsOnHandoff();
++            lock (_handoffLock)
++                _lastAutomaticHandoffConnection = 0;
++        }
++        else if (Device.Current is { } device)
++            _ = TryEnableBudsOnMultipointAutomaticallyAsync(device);
++#endif
++    }
++
++    internal bool CanApplyBudsOnMultipoint(Device device)
++    {
++#if OSX
++        return !BudsOnReadOnly && IsBudsOnSettingsDevice(device) &&
++               BudsOnDiagnostics.GetHandoffSession(device).HasValue;
++#else
++        return false;
++#endif
++    }
++
++    internal Task<string> ApplyBudsOnMultipointAsync(Device device) => StartBudsOnHandoffAsync(device);
++
+ #if OSX
+     private enum HandoffStage
+     {
+@@ -451,10 +482,11 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+         Holding
+     }
+ 
+-    private sealed class HandoffAttempt(Device device, long session)
++    private sealed class HandoffAttempt(Device device, long session, long? automaticConnection)
+     {
+         internal readonly Device Device = device;
+         internal readonly long Session = session;
++        internal readonly long? AutomaticConnection = automaticConnection;
+         internal readonly string Mac = device.MacAddress;
+         internal readonly long Started = Stopwatch.GetTimestamp();
+         internal ulong Ticket;
+@@ -464,6 +496,47 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+     private readonly object _handoffLock = new();
+     private HandoffAttempt? _handoffAttempt;
+     private bool _handoffDisposed;
++    private long _readyBudsOnManagementConnection;
++    private long _lastAutomaticHandoffConnection;
++
++    private bool IsBudsOnAutoHandoffEligible(Device device, long connection) =>
++        Settings.Data.AutoEnableBudsOnMultipoint && !BudsOnReadOnly && IsBudsOnSettingsDevice(device) &&
++        Volatile.Read(ref _readyBudsOnManagementConnection) == connection &&
++        BudsOnDiagnostics.GetFreshHandoffConnection(device) == connection;
++
++    private Task TryEnableBudsOnMultipointAutomaticallyAsync(Device device)
++    {
++        if (!Settings.Data.AutoEnableBudsOnMultipoint || BudsOnReadOnly || !IsBudsOnSettingsDevice(device) ||
++            BudsOnDiagnostics.GetFreshHandoffConnection(device) is not { } connection ||
++            Volatile.Read(ref _readyBudsOnManagementConnection) != connection)
++            return Task.CompletedTask;
++
++        lock (_handoffLock)
++        {
++            if (_handoffDisposed || connection <= _lastAutomaticHandoffConnection ||
++                !IsBudsOnAutoHandoffEligible(device, connection))
++                return Task.CompletedTask;
++            _lastAutomaticHandoffConnection = connection;
++        }
++
++        // A receive callback can run while native code holds its channel lock.
++        // Schedule Bluetooth work only after returning from that callback.
++        return Task.Run(async () =>
++        {
++            try
++            {
++                if (!IsBudsOnAutoHandoffEligible(device, connection))
++                    return;
++                var outcome = await StartBudsOnHandoffAsync(device, connection);
++                BudsOnDiagnostics.Record($"Buds On automatic multipoint: {outcome}");
++            }
++            catch (Exception ex)
++            {
++                Log.Warning(ex, "Buds On automatic multipoint failed");
++                BudsOnDiagnostics.Record("Buds On automatic multipoint failed.");
++            }
++        });
++    }
+ 
+     private void OnHandoffDeviceChanged(object? sender, Device? device) => InvalidateBudsOnHandoff();
+ 
+@@ -484,6 +557,8 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+         lock (_handoffLock)
+             return ReferenceEquals(_handoffAttempt, attempt) && !_handoffDisposed && !BudsOnReadOnly &&
+                    IsBudsOnSettingsDevice(attempt.Device) &&
++                   (!attempt.AutomaticConnection.HasValue ||
++                    IsBudsOnAutoHandoffEligible(attempt.Device, attempt.AutomaticConnection.Value)) &&
+                    BudsOnDiagnostics.GetHandoffSession(attempt.Device) == attempt.Session &&
+                    string.Equals(attempt.Mac, attempt.Device.MacAddress, StringComparison.OrdinalIgnoreCase);
+     }
+@@ -534,6 +609,7 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+     private void OnBudsOnManagementConnectionChanged()
+     {
+ #if OSX
++        Volatile.Write(ref _readyBudsOnManagementConnection, 0);
+         // An open SMEP session is independent of a management reconnect.
+         // A write in progress resolves through its own native result.
+         InvalidateHandoffAttempt(openingOnly: true);
+@@ -568,27 +644,34 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+ #endif
+     }
+ 
+-    internal async Task<string> StartBudsOnHandoffAsync(Device device)
++    internal async Task<string> StartBudsOnHandoffAsync(Device device, long? automaticConnection = null)
+     {
+         if (BudsOnReadOnly)
+             return "Buds On is in read-only mode.";
+ #if OSX
++        var (heldTicket, starting) = GetBudsOnHandoffStatus(device);
++        if (heldTicket != 0)
++            return "Multipoint is already enabled for this connection.";
++        if (starting)
++            return "Buds On multipoint setup is already in progress.";
+         if (_backend is OSX.BluetoothService backend && IsBudsOnSettingsDevice(device))
+         {
+-            if (BudsOnDiagnostics.GetHandoffSession(device) is not { } session)
++            if (!CanApplyBudsOnMultipoint(device) || BudsOnDiagnostics.GetHandoffSession(device) is not { } session)
+                 return "Waiting for Buds On to report its status. Try again once the app displays it.";
+             if (Interlocked.CompareExchange(ref _budsOnOperationInProgress, 1, 0) != 0)
+                 return "Another Buds On operation is in progress.";
+ 
+             ulong nativeTicket = 0;
+             var keepOpen = false;
+-            var attempt = new HandoffAttempt(device, session);
++            var attempt = new HandoffAttempt(device, session, automaticConnection);
+             try
+             {
+                 lock (_handoffLock)
+                 {
+                     if (_handoffDisposed || BudsOnReadOnly || !IsBudsOnSettingsDevice(device))
+                         return DescribeHandoffResult(HandoffResult.TargetUnavailable);
++                    if (automaticConnection.HasValue && !IsBudsOnAutoHandoffEligible(device, automaticConnection.Value))
++                        return "Automatic setup stopped because the selected connection or preference changed.";
+                     if (_handoffAttempt != null)
+                         return "A Mac audio handoff session is already active.";
+                     _handoffAttempt = attempt;
+@@ -629,9 +712,15 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+                         keepOpen = true;
+                     }
+                     RecordHandoff(attempt, "Samsung control channel confirmed open after setup.");
+-                    return "macOS completed one setup write. Earbud acceptance is unconfirmed.";
++                    return "Multipoint setup is active for this connection.";
+                 });
+             }
++            catch (Exception ex)
++            {
++                Log.Warning(ex, "Buds On multipoint setup failed");
++                RecordHandoff(attempt, "macOS could not confirm the setup outcome.");
++                return "macOS could not confirm the setup outcome.";
++            }
+             finally
+             {
+                 if (!keepOpen)
+@@ -981,7 +1070,11 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+             Log.Error("BluetoothImpl: Suppressing Connected event, device not properly registered");
+             return;
+         }
+-        
++
++#if OSX
++        var budsOnDevice = Device.Current is { Model: Models.BudsOn } selected ? selected : null;
++        var budsOnConnection = budsOnDevice == null ? null : BudsOnDiagnostics.GetManagementConnection(budsOnDevice);
++#endif
+         _ = Task.Delay(150).ContinueWith(_ =>
+         {
+             Dispatcher.UIThread.Post(() =>
+@@ -995,6 +1088,15 @@ public sealed partial class BluetoothImpl : ReactiveObject, IDisposable
+                 {
+                     IsConnected = true;
+                     Connected?.Invoke(this, EventArgs.Empty);
++#if OSX
++                    if (budsOnDevice != null && budsOnConnection.HasValue &&
++                        ReferenceEquals(Device.Current, budsOnDevice) &&
++                        BudsOnDiagnostics.GetManagementConnection(budsOnDevice) == budsOnConnection)
++                    {
++                        Volatile.Write(ref _readyBudsOnManagementConnection, budsOnConnection.Value);
++                        _ = TryEnableBudsOnMultipointAutomaticallyAsync(budsOnDevice);
++                    }
++#endif
+                 }
+             });
+         });
+diff --git a/GalaxyBudsClient/Platform/BudsOnDiagnostics.cs b/GalaxyBudsClient/Platform/BudsOnDiagnostics.cs
+index cb857721..a7627619 100644
+--- a/GalaxyBudsClient/Platform/BudsOnDiagnostics.cs
++++ b/GalaxyBudsClient/Platform/BudsOnDiagnostics.cs
+@@ -21,6 +21,7 @@ internal static class BudsOnDiagnostics
+     private static int? _macBattery;
+     private static Device? _receiveDevice;
+     private static Device? _settingsDevice;
++    private static long _receiveConnection;
+     private static long _receiveSession;
+     private static ulong _receiveStamp;
+     private static long _statusObservedAt;
+@@ -305,6 +306,23 @@ internal static class BudsOnDiagnostics
+                 ? _receiveSession : null;
+     }
+ 
++    // Unlike a receive session, this identifier does not change when packet
++    // assembly resynchronizes on the same management connection.
++    internal static long? GetManagementConnection(Device device)
++    {
++        lock (Sync)
++            return ReferenceEquals(_receiveDevice, device) ? _receiveConnection : null;
++    }
++
++    internal static long? GetFreshHandoffConnection(Device device)
++    {
++        lock (Sync)
++            return ReferenceEquals(_receiveDevice, device) && _receiveStamp != 0 &&
++                FrameProbe.LatestControlStatus != null &&
++                Stopwatch.GetElapsedTime(_statusObservedAt) <= TimeSpan.FromSeconds(60)
++                    ? _receiveConnection : null;
++    }
++
+     public static bool HasLiveBudsOnStatus(Device device) => HasFreshStatus(device);
+ 
+     public static bool HasFreshStatus(Device device)
+@@ -370,6 +388,7 @@ internal static class BudsOnDiagnostics
+             if (device?.Model != Models.BudsOn)
+                 device = null;
+             _receiveDevice = device;
++            _receiveConnection++;
+             _receiveSession++;
+             _receiveStamp = 0;
+             _statusObservedAt = 0;
+diff --git a/GalaxyBudsClient/Utils/Interface/TrayManager.cs b/GalaxyBudsClient/Utils/Interface/TrayManager.cs
+index de058def..5f8f6d26 100644
+--- a/GalaxyBudsClient/Utils/Interface/TrayManager.cs
++++ b/GalaxyBudsClient/Utils/Interface/TrayManager.cs
+@@ -114,29 +114,22 @@ internal class TrayManager
+         await RebuildAsync();
+     }
+ 
+-    private static IEnumerable<NativeMenuItemBase?> RebuildBatteryInfo()
++    private static IEnumerable<NativeMenuItemBase?> RebuildBatteryInfo(int? left, int? right, int? batteryCase)
+     {
+-        var bsu = DeviceMessageCache.Instance.BasicStatusUpdate!;
+-        var batteryCase = bsu.BatteryCase;
+-        if (batteryCase > 100)
+-        {
+-            batteryCase = DeviceMessageCache.Instance.BasicStatusUpdateWithValidCase?.BatteryCase ?? bsu.BatteryCase;
+-        }
+-            
+         var deviceName = BluetoothImpl.Instance.Device.Current?.Name;
+         return
+         [
+             PlatformUtils.IsOSX && !string.IsNullOrWhiteSpace(deviceName)
+                 ? new NativeMenuItem(deviceName) { IsEnabled = false, Icon = Icon(Symbol.Headphones) }
+                 : null,
+-            bsu.BatteryL > 0
+-                ? new NativeMenuItem($"{Strings.Left}: {bsu.BatteryL}%") { IsEnabled = false, Icon = BatteryIcon(bsu.BatteryL) }
++            left is int leftLevel
++                ? new NativeMenuItem($"{Strings.Left}: {leftLevel}%") { IsEnabled = false, Icon = BatteryIcon(leftLevel) }
+                 : null,
+-            bsu.BatteryR > 0
+-                ? new NativeMenuItem($"{Strings.Right}: {bsu.BatteryR}%") { IsEnabled = false, Icon = BatteryIcon(bsu.BatteryR) }
++            right is int rightLevel
++                ? new NativeMenuItem($"{Strings.Right}: {rightLevel}%") { IsEnabled = false, Icon = BatteryIcon(rightLevel) }
+                 : null,
+-            batteryCase is > 0 and <= 100 && BluetoothImpl.Instance.DeviceSpec.Supports(Features.CaseBattery)
+-                ? new NativeMenuItem($"{Strings.Case}: {batteryCase}%") { IsEnabled = false, Icon = BatteryIcon(batteryCase) }
++            batteryCase is int caseLevel
++                ? new NativeMenuItem($"{Strings.Case}: {caseLevel}%") { IsEnabled = false, Icon = BatteryIcon(caseLevel) }
+                 : null,
+ 
+             new NativeMenuItemSeparator()
+@@ -251,9 +244,21 @@ internal class TrayManager
+                 });
+                 items.Add(new NativeMenuItemSeparator());
+             }
+-            if (BluetoothImpl.Instance.IsConnected && DeviceMessageCache.Instance.BasicStatusUpdate != null)
++            var bluetooth = BluetoothImpl.Instance;
++            if (bluetooth.IsConnected && bluetooth.Device.Current is { Model: Models.BudsOn } budsOn)
++            {
++                var (left, right, batteryCase) = BudsOnDiagnostics.GetBattery(budsOn);
++                items.AddRange(RebuildBatteryInfo(left, right, batteryCase).OfType<NativeMenuItemBase>());
++            }
++            else if (bluetooth.IsConnected && DeviceMessageCache.Instance.BasicStatusUpdate is { } status)
+             {
+-                items.AddRange(RebuildBatteryInfo().OfType<NativeMenuItemBase>());
++                var batteryCase = status.BatteryCase > 100
++                    ? DeviceMessageCache.Instance.BasicStatusUpdateWithValidCase?.BatteryCase ?? status.BatteryCase
++                    : status.BatteryCase;
++                items.AddRange(RebuildBatteryInfo(status.BatteryL > 0 ? status.BatteryL : null,
++                    status.BatteryR > 0 ? status.BatteryR : null,
++                    batteryCase is > 0 and <= 100 && bluetooth.DeviceSpec.Supports(Features.CaseBattery)
++                        ? batteryCase : null).OfType<NativeMenuItemBase>());
+                 items.AddRange(RebuildDynamicActions());
+                 items.Add(new NativeMenuItemSeparator());
+             }
+@@ -306,4 +311,4 @@ internal class TrayManager
+         _ = _instance.RebuildAsync();
+     }
+     #endregion
+-}
+\ No newline at end of file
++}

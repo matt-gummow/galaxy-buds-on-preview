@@ -10,20 +10,21 @@ The workflow checks out upstream commit `85dfc8bb39fc45d3c30ecf71ab2c663fb1d4172
 
 ## Mac–Fold handoff preview
 
-Preview 4 (5.2.1.4) fixes a crash opening Home, removes unsupported Buds On pages, and restores displayed touch switch values when a change fails. It also updates Avalonia to address a macOS shutdown crash. The Manager sends the same Galaxy Book setup message once and holds a separate Samsung control channel during the handoff. [Preview builds](https://github.com/matt-gummow/galaxy-buds-on-preview/actions/workflows/build-buds-on-macos.yml)
+Preview 5 (5.2.1.5) uses the Manager’s Multipoint panel for Buds On. The Manager sends the same Galaxy Book setup message once and holds a separate Samsung control channel during the handoff. [Preview builds](https://github.com/matt-gummow/galaxy-buds-on-preview/actions/workflows/build-buds-on-macos.yml)
 
-Connect the selected Buds On to the Mac and confirm that Mac audio plays through them. In **Settings → Experimental Mac audio handoff**, select **Send setup once**. Reconnect the Fold once, then take a Fold call while Mac audio is playing. After hanging up, press Play on the Mac if the player stayed paused. The standalone check confirmed that the call switched automatically and Mac playback returned when restarted, without a manual Bluetooth reconnect. Use **End handoff session** to release the control channel.
+In **Settings → Multipoint**, turn on **Enable multipoint automatically** to set up switching when Buds On connects to the Mac. The preference is off by default. **Apply now** sets up the current connection and reports when the session is already active. Turning the preference off ends the Buds On session.
 
-For the Manager hardware check, also confirm the Equalizer and Touchpad pages work while handoff is active. Repeat the call after a charging-case cycle and after Mac sleep to check how the two connections recover. The connection report is available in Settings.
+For the Manager hardware check, reconnect the Fold once during the initial setup and take a Fold call while Mac audio is playing. After hanging up, press Play if the Mac player stayed paused. Repeat after a charging-case cycle to verify automatic setup. The connection report is available in **Settings → Buds On diagnostics**.
 
 ## Using the app
 
 | Page | Buds On support |
 | --- | --- |
-| **Home** | Manager battery indicators for each earbud and the case, populated from validated device status. The macOS headset battery is shown when individual levels are unavailable. |
+| **Home** | Manager battery indicators for each earbud and the case, populated from validated device status. The macOS headset battery is shown when individual levels are unavailable. The menu bar menu uses the same confirmed individual readings. |
 | **Touchpad** | Manager switches for media controls, answering or ending calls, and declining calls. These commands were confirmed on SM-U600 in the preceding hardware previews. Left and right volume hold are available for experimental testing when both hold actions are known. |
 | **Equalizer** | The shared Manager preset selector shows six standard presets from Balanced through Treble boost. Preset writes passed a hardware test in the previous preview. A Custom curve can be read from the device when it returns a supported reply. |
-| **Settings** | Experimental Gaming mode and Pause when one earbud is removed, a reversible read-only mode for the running app, and the connection report. |
+| **Advanced settings** | Manager switches for Gaming mode and Pause when one earbud is removed. Both are experimental on SM-U600. |
+| **Settings** | Multipoint setup, read-only diagnostics, and the connection report. |
 
 Pair the earbuds in macOS Bluetooth first and connect in GalaxyBudsClient. Changes are explicit actions on the selected device. The app checks recent status before sending a change. A matching EQ reply updates the preset without reconnecting. If the earbuds only acknowledge a touch command, select **Refresh status** to check the result. Last reported values stay visible during a management reconnect, and they do not authorize writes. The app sends each setting command once.
 
