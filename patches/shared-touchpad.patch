@@ -1,0 +1,421 @@
+diff --git a/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml b/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml
+--- a/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml
++++ b/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml
+@@ -27,44 +27,12 @@
+ 
+             <StackPanel IsVisible="{Binding IsBudsOnTouchpad}" Spacing="8">
+                 <controls:SettingsGroup IsEnabled="{Binding !IsBudsOnTouchpadBusy}">
+-                    <controls:SettingsComboBoxItem
+-                        Content="{ext:Translate {x:Static i18N:Keys.TouchpadLeftAction}}"
+-                        Description="{Binding BudsOnLeftHoldVolume.HoldDescription}"
+-                        Symbol="ArrowStepInLeft"
+-                        ItemsSource="{Binding BudsOnHoldActions}"
+-                        DisplayMemberBinding="{Binding}"
+-                        SelectedValue="{Binding BudsOnLeftHoldVolume.HoldAction, Mode=OneWay}"
+-                        IsEnabled="{Binding BudsOnLeftHoldVolume.CanChange}"
+-                        SelectionChanged="OnBudsOnLeftHoldSelectionChanged" />
+-                    <controls:SettingsComboBoxItem
+-                        Content="{ext:Translate {x:Static i18N:Keys.TouchpadRightAction}}"
+-                        Description="{Binding BudsOnRightHoldVolume.HoldDescription}"
+-                        Symbol="ArrowStepInRight"
+-                        ItemsSource="{Binding BudsOnHoldActions}"
+-                        DisplayMemberBinding="{Binding}"
+-                        SelectedValue="{Binding BudsOnRightHoldVolume.HoldAction, Mode=OneWay}"
+-                        IsEnabled="{Binding BudsOnRightHoldVolume.CanChange}"
+-                        SelectionChanged="OnBudsOnRightHoldSelectionChanged" />
+-                </controls:SettingsGroup>
+-                <controls:SettingsGroup IsEnabled="{Binding !IsBudsOnTouchpadBusy}">
+                     <controls:SettingsSwitchItem
+                         Content="Media controls"
+                         Description="{Binding BudsOnMediaDescription}"
+                         Symbol="VideoPlayPause"
+                         IsChecked="{Binding IsBudsOnMediaEnabled, Mode=TwoWay}"
+                         IsEnabled="{Binding BudsOnMedia.CanChange}" />
+-                    <controls:SettingsSwitchItem
+-                        Content="{ext:Translate {x:Static i18N:Keys.TouchpadGestureDoubleForCall}}"
+-                        Description="{Binding BudsOnAnswerOrEndDescription}"
+-                        Symbol="CallInbound"
+-                        IsChecked="{Binding IsBudsOnAnswerOrEndEnabled, Mode=TwoWay}"
+-                        IsEnabled="{Binding BudsOnAnswerOrEnd.CanChange}" />
+-                    <controls:SettingsSwitchItem
+-                        Content="{ext:Translate {x:Static i18N:Keys.TouchpadGestureHoldForCall}}"
+-                        Description="{Binding BudsOnDeclineDescription}"
+-                        Symbol="CallProhibited"
+-                        IsChecked="{Binding IsBudsOnDeclineEnabled, Mode=TwoWay}"
+-                        IsEnabled="{Binding BudsOnDecline.CanChange}" />
+                 </controls:SettingsGroup>
+                 <Button Content="Refresh status"
+                         IsEnabled="{Binding CanRefreshBudsOnTouchpad}"
+@@ -86,23 +54,19 @@
+                     IsChecked="{Binding IsTouchpadLocked}" />
+             </controls:SettingsGroup>
+ 
+-            <controls:SettingsGroup IsVisible="{Binding !IsBudsOnTouchpad}">
+-                <controls:SettingsGroup.IsEnabled>
+-                    <MultiBinding Converter="{x:Static BoolConverters.And}">
+-                        <Binding Path="!IsTouchpadLocked" />
+-                        <Binding Path="IsHoldGestureEnabled" />
+-                    </MultiBinding>
+-                </controls:SettingsGroup.IsEnabled>
++            <controls:SettingsGroup IsEnabled="{Binding CanUseSharedHoldActions}">
+ 
+                 <controls:SettingsComboBoxItem
+                     Content="{ext:Translate {x:Static i18N:Keys.TouchpadLeftAction}}"
+-                    Description="{Binding LeftActionDescription}"
++                    Description="{Binding SharedLeftActionDescription}"
+                     Symbol="ArrowStepInLeft"
+-                    DisplayMemberBinding="{Binding ., Converter={StaticResource EnumDescriptionConverter}, DataType=constants:TouchOptions}"
+-                    ItemsSource="{Binding LeftActions}"
+-                    SelectedValue="{Binding LeftAction}"
+-                    IsToolButtonVisible="True"
++                    DisplayMemberBinding="{Binding}"
++                    ItemsSource="{Binding SharedLeftActions}"
++                    SelectedValue="{Binding SharedLeftAction, Mode=TwoWay}"
++                    IsEnabled="{Binding CanEditSharedLeftAction}"
++                    IsToolButtonVisible="{Binding !IsBudsOnTouchpad}"
+                     IsToolButtonEnabled="{Binding IsLeftCustomActionEditable}"
++                    SelectionChanged="OnBudsOnLeftHoldSelectionChanged"
+                     ToolButtonClick="OnEditLeftCustomActionClicked">
+                     
+                     <controls:SettingsComboBoxItem.ToolButtonContent>
+@@ -113,13 +77,15 @@
+ 
+                 <controls:SettingsComboBoxItem
+                     Content="{ext:Translate {x:Static i18N:Keys.TouchpadRightAction}}"
+-                    Description="{Binding RightActionDescription}"
++                    Description="{Binding SharedRightActionDescription}"
+                     Symbol="ArrowStepInRight"
+-                    DisplayMemberBinding="{Binding ., Converter={StaticResource EnumDescriptionConverter}, DataType=constants:TouchOptions}"
+-                    ItemsSource="{Binding RightActions}"
+-                    SelectedValue="{Binding RightAction}"
+-                    IsToolButtonVisible="True"
++                    DisplayMemberBinding="{Binding}"
++                    ItemsSource="{Binding SharedRightActions}"
++                    SelectedValue="{Binding SharedRightAction, Mode=TwoWay}"
++                    IsEnabled="{Binding CanEditSharedRightAction}"
++                    IsToolButtonVisible="{Binding !IsBudsOnTouchpad}"
+                     IsToolButtonEnabled="{Binding IsRightCustomActionEditable}"
++                    SelectionChanged="OnBudsOnRightHoldSelectionChanged"
+                     ToolButtonClick="OnEditRightCustomActionClicked">
+                     
+                     <controls:SettingsComboBoxItem.ToolButtonContent>
+@@ -221,26 +187,6 @@
+                 </controls:SettingsSwitchItem>
+ 
+                 <controls:SettingsSwitchItem
+-                    Content="{ext:Translate {x:Static i18N:Keys.TouchpadGestureDoubleForCall}}"
+-                    Description="{ext:Translate {x:Static i18N:Keys.TouchpadGestureDoubleForCallDesc}}"
+-                    Symbol="CallInbound"
+-                    IsChecked="{Binding IsDoubleTapGestureForCallsEnabled}">
+-                    <Interaction.Behaviors>
+-                        <ext:RequiresFeatureBehavior Feature="AdvancedTouchLockForCalls" />
+-                    </Interaction.Behaviors>
+-                </controls:SettingsSwitchItem>
+-                
+-                <controls:SettingsSwitchItem
+-                    Content="{ext:Translate {x:Static i18N:Keys.TouchpadGestureHoldForCall}}"
+-                    Description="{ext:Translate {x:Static i18N:Keys.TouchpadGestureHoldForCallDesc}}"
+-                    Symbol="CallProhibited"
+-                    IsChecked="{Binding IsHoldGestureForCallsEnabled}">
+-                    <Interaction.Behaviors>
+-                        <ext:RequiresFeatureBehavior Feature="AdvancedTouchLockForCalls" />
+-                    </Interaction.Behaviors>
+-                </controls:SettingsSwitchItem>
+-
+-                <controls:SettingsSwitchItem
+                     Content="{ext:Translate {x:Static i18N:Keys.TouchpadDoubleTapVolume}}"
+                     Description="{ext:Translate {x:Static i18N:Keys.TouchpadDoubleTapVolumeDescription}}"
+                     Symbol="TapDouble"
+@@ -251,6 +197,20 @@
+                 </controls:SettingsSwitchItem>
+             </controls:SettingsGroup>
+ 
++            <controls:SettingsGroup IsVisible="{Binding ShowSharedCallControls}">
++                <controls:SettingsSwitchItem
++                    Content="{Binding SharedAnswerCallLabel}"
++                    Description="{Binding SharedAnswerCallDescription}"
++                    Symbol="CallInbound"
++                    IsChecked="{Binding SharedAnswerCallEnabled, Mode=TwoWay}"
++                    IsEnabled="{Binding CanEditSharedAnswerCall}" />
++                <controls:SettingsSwitchItem
++                    Content="{Binding SharedDeclineCallLabel}"
++                    Description="{Binding SharedDeclineCallDescription}"
++                    Symbol="CallProhibited"
++                    IsChecked="{Binding SharedDeclineCallEnabled, Mode=TwoWay}"
++                    IsEnabled="{Binding CanEditSharedDeclineCall}" />
++            </controls:SettingsGroup>
+         </StackPanel>
+     </ScrollViewer>
+ 
+diff --git a/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml.cs b/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml.cs
+--- a/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml.cs
++++ b/GalaxyBudsClient/Interface/Pages/TouchpadPage.axaml.cs
+@@ -30,12 +30,12 @@
+         BudsOnDiagnostics.Option option, string side)
+     {
+         if (sender is not SettingsComboBoxItem control || e.AddedItems.Count != 1 ||
+-            e.AddedItems[0] is not TouchpadPageViewModel.BudsOnHoldAction action ||
+-            ViewModel is not { } viewModel)
++            e.AddedItems[0] is not TouchpadPageViewModel.SharedHoldAction { StandardAction: null } action ||
++            ViewModel is not { IsBudsOnTouchpad: true } viewModel)
+             return;
+ 
+         var setting = GetBudsOnHoldSetting(viewModel, option);
+-        var desired = action.Volume;
++        var desired = action.BudsOnVolume;
+         if (desired == setting.Enabled)
+             return;
+ 
+@@ -91,8 +91,9 @@
+         Dispatcher.UIThread.Post(() =>
+         {
+             viewModel.RefreshBudsOnTouchpad();
+-            control.SetCurrentValue(SettingsComboBoxItem.SelectedValueProperty,
+-                GetBudsOnHoldSetting(viewModel, option).HoldAction);
++            if (viewModel.IsBudsOnTouchpad)
++                control.SetCurrentValue(SettingsComboBoxItem.SelectedValueProperty,
++                    GetBudsOnHoldSetting(viewModel, option).HoldAction);
+         });
+     }
+ 
+diff --git a/GalaxyBudsClient/Interface/ViewModels/Pages/TouchpadPageViewModel.cs b/GalaxyBudsClient/Interface/ViewModels/Pages/TouchpadPageViewModel.cs
+--- a/GalaxyBudsClient/Interface/ViewModels/Pages/TouchpadPageViewModel.cs
++++ b/GalaxyBudsClient/Interface/ViewModels/Pages/TouchpadPageViewModel.cs
+@@ -6,6 +6,7 @@
+ using Avalonia.Controls;
+ using Avalonia.Threading;
+ using FluentIcons.Common;
++using GalaxyBudsClient.Generated.Enums;
+ using GalaxyBudsClient.Generated.I18N;
+ using GalaxyBudsClient.Interface.Dialogs;
+ using GalaxyBudsClient.Interface.Pages;
+@@ -26,12 +27,14 @@
+ 
+ public partial class TouchpadPageViewModel : MainPageViewModelBase
+ {
+-    public sealed record BudsOnHoldAction(bool Volume)
++    public sealed record SharedHoldAction(TouchOptions? StandardAction, bool BudsOnVolume = false)
+     {
+-        public override string ToString() => Volume ? Strings.TouchoptionVolume : Strings.Off;
++        public override string ToString() => StandardAction is { } action
++            ? CompiledEnums.GetDescriptionByType(typeof(TouchOptions), action).Replace("{0}", ((int)action).ToString())
++            : BudsOnVolume ? Strings.TouchoptionVolume : Strings.Off;
+     }
+ 
+-    public IReadOnlyList<BudsOnHoldAction> BudsOnHoldActions { get; } = [new(false), new(true)];
++    private static readonly SharedHoldAction[] BudsOnHoldActions = [new(null), new(null, true)];
+ 
+     public sealed record BudsOnTouchSetting(bool? Enabled, bool Experimental = false,
+         bool ReadOnly = false, bool CanSend = false)
+@@ -45,7 +48,7 @@
+             (Enabled.HasValue && !CanSend ? " · Last reported" : "");
+ 
+         public bool CanChange => Enabled.HasValue && CanSend && !ReadOnly;
+-        public BudsOnHoldAction? HoldAction => Enabled is { } value ? new(value) : null;
++        public SharedHoldAction? HoldAction => Enabled is { } value ? BudsOnHoldActions[value ? 1 : 0] : null;
+         public string HoldDescription => (Enabled, CanSend, ReadOnly) switch
+         {
+             (null, _, _) => "Experimental · Unavailable",
+@@ -61,6 +64,7 @@
+     private bool _canRefreshBudsOnTouchpad;
+     private bool _isBudsOnTouchpadBusy;
+     private bool _syncingBudsOnTouchpad;
++    private bool _syncingSharedControls;
+     private string? _budsOnTouchpadResult;
+     private BudsOnTouchSetting _budsOnMedia = new(null);
+     private BudsOnTouchSetting _budsOnAnswerOrEnd = new(null);
+@@ -111,6 +115,85 @@
+     public BudsOnTouchSetting BudsOnRightHoldVolume => _budsOnRightHoldVolume;
+     public bool HasBudsOnTouchpadResult => !string.IsNullOrEmpty(BudsOnTouchpadResult);
+ 
++    public bool CanUseSharedHoldActions => IsBudsOnTouchpad
++        ? !IsBudsOnTouchpadBusy : !IsTouchpadLocked && IsHoldGestureEnabled;
++    public bool CanEditSharedLeftAction => !IsBudsOnTouchpad || BudsOnLeftHoldVolume.CanChange;
++    public bool CanEditSharedRightAction => !IsBudsOnTouchpad || BudsOnRightHoldVolume.CanChange;
++    public string? SharedLeftActionDescription => IsBudsOnTouchpad
++        ? BudsOnLeftHoldVolume.HoldDescription : LeftActionDescription;
++    public string? SharedRightActionDescription => IsBudsOnTouchpad
++        ? BudsOnRightHoldVolume.HoldDescription : RightActionDescription;
++    public IEnumerable<SharedHoldAction> SharedLeftActions => IsBudsOnTouchpad
++        ? BudsOnHoldActions : LeftActions?.Select(action => new SharedHoldAction(action)) ?? [];
++    public IEnumerable<SharedHoldAction> SharedRightActions => IsBudsOnTouchpad
++        ? BudsOnHoldActions : RightActions?.Select(action => new SharedHoldAction(action)) ?? [];
++
++    public SharedHoldAction? SharedLeftAction
++    {
++        get => IsBudsOnTouchpad ? BudsOnLeftHoldVolume.HoldAction : new(LeftAction);
++        set
++        {
++            if (!_syncingSharedControls && !IsBudsOnTouchpad && BluetoothImpl.Instance.CurrentModel != Models.BudsOn &&
++                CanUseSharedHoldActions && value?.StandardAction is { } action && LeftActions?.Contains(action) == true)
++                LeftAction = action;
++        }
++    }
++
++    public SharedHoldAction? SharedRightAction
++    {
++        get => IsBudsOnTouchpad ? BudsOnRightHoldVolume.HoldAction : new(RightAction);
++        set
++        {
++            if (!_syncingSharedControls && !IsBudsOnTouchpad && BluetoothImpl.Instance.CurrentModel != Models.BudsOn &&
++                CanUseSharedHoldActions && value?.StandardAction is { } action && RightActions?.Contains(action) == true)
++                RightAction = action;
++        }
++    }
++
++    public bool ShowSharedCallControls => IsBudsOnTouchpad ||
++        BluetoothImpl.Instance.DeviceSpec.Supports(Features.AdvancedTouchLockForCalls);
++    public bool CanEditSharedAnswerCall => IsBudsOnTouchpad
++        ? !IsBudsOnTouchpadBusy && BudsOnAnswerOrEnd.CanChange : !IsTouchpadLocked;
++    public bool CanEditSharedDeclineCall => IsBudsOnTouchpad
++        ? !IsBudsOnTouchpadBusy && BudsOnDecline.CanChange : !IsTouchpadLocked;
++    private static bool UsesPinch => BluetoothImpl.Instance.CurrentModel is Models.Buds4 or Models.Buds4Pro;
++    public string SharedAnswerCallLabel => UsesPinch ? "Pinch during call" : Strings.TouchpadGestureDoubleForCall;
++    public string SharedDeclineCallLabel => UsesPinch ? "Pinch and hold during call" : Strings.TouchpadGestureHoldForCall;
++    public string SharedAnswerCallDescription => IsBudsOnTouchpad
++        ? BudsOnAnswerOrEndDescription : Strings.TouchpadGestureDoubleForCallDesc;
++    public string SharedDeclineCallDescription => IsBudsOnTouchpad
++        ? BudsOnDeclineDescription : Strings.TouchpadGestureHoldForCallDesc;
++
++    public bool? SharedAnswerCallEnabled
++    {
++        get => IsBudsOnTouchpad ? IsBudsOnAnswerOrEndEnabled : IsDoubleTapGestureForCallsEnabled;
++        set
++        {
++            if (_syncingSharedControls)
++                return;
++            if (IsBudsOnTouchpad)
++                IsBudsOnAnswerOrEndEnabled = value;
++            else if (BluetoothImpl.Instance.CurrentModel != Models.BudsOn && value is { } enabled &&
++                     ShowSharedCallControls && CanEditSharedAnswerCall)
++                IsDoubleTapGestureForCallsEnabled = enabled;
++        }
++    }
++
++    public bool? SharedDeclineCallEnabled
++    {
++        get => IsBudsOnTouchpad ? IsBudsOnDeclineEnabled : IsHoldGestureForCallsEnabled;
++        set
++        {
++            if (_syncingSharedControls)
++                return;
++            if (IsBudsOnTouchpad)
++                IsBudsOnDeclineEnabled = value;
++            else if (BluetoothImpl.Instance.CurrentModel != Models.BudsOn && value is { } enabled &&
++                     ShowSharedCallControls && CanEditSharedDeclineCall)
++                IsHoldGestureForCallsEnabled = enabled;
++        }
++    }
++
+     public bool IsBudsOnTouchpadBusy
+     {
+         get => _isBudsOnTouchpadBusy;
+@@ -167,6 +250,8 @@
+     {
+         UpdateEditStates();
+         RefreshBudsOnTouchpad();
++        NotifySharedCallControls();
++        NotifySharedHoldControls(refreshOptions: true);
+         if (PlatformUtils.IsOSX)
+             _budsOnTouchpadTimer.Start();
+     }
+@@ -312,7 +397,10 @@
+ 
+     private void OnConnected(object? sender, EventArgs e)
+     {
++        RefreshBudsOnTouchpad();
++        NotifySharedCallControls();
+         UpdateTouchActions();
++        NotifySharedHoldControls(refreshOptions: true);
+         this.RaisePropertyChanged(nameof(NoiseControlCycleModeOptions));
+     }
+ 
+@@ -326,6 +414,16 @@
+ 
+     private void OnExtendedStatusUpdate(object? sender, ExtendedStatusUpdateDecoder e)
+     {
++        if (BluetoothImpl.Instance.CurrentModel == Models.BudsOn)
++            return;
++
++        ApplyExtendedTouchStatus(e);
++        NotifySharedCallControls();
++        NotifySharedHoldControls();
++    }
++
++    private void ApplyExtendedTouchStatus(ExtendedStatusUpdateDecoder e)
++    {
+         using var suppressor = SuppressChangeNotifications();
+ 
+         LeftAction = e.TouchpadOptionL;
+@@ -379,8 +477,71 @@
+         UpdateEditStates();
+     }
+ 
++    private void NotifySharedHoldControls(bool refreshOptions = false)
++    {
++        var wasSyncing = _syncingSharedControls;
++        _syncingSharedControls = true;
++        try
++        {
++            if (refreshOptions)
++            {
++                this.RaisePropertyChanged(nameof(SharedLeftActions));
++                this.RaisePropertyChanged(nameof(SharedRightActions));
++            }
++            this.RaisePropertyChanged(nameof(CanUseSharedHoldActions));
++            this.RaisePropertyChanged(nameof(CanEditSharedLeftAction));
++            this.RaisePropertyChanged(nameof(CanEditSharedRightAction));
++            this.RaisePropertyChanged(nameof(SharedLeftActionDescription));
++            this.RaisePropertyChanged(nameof(SharedRightActionDescription));
++            this.RaisePropertyChanged(nameof(SharedLeftAction));
++            this.RaisePropertyChanged(nameof(SharedRightAction));
++        }
++        finally
++        {
++            _syncingSharedControls = wasSyncing;
++        }
++    }
++
++    private void NotifySharedCallControls()
++    {
++        var wasSyncing = _syncingSharedControls;
++        _syncingSharedControls = true;
++        try
++        {
++            this.RaisePropertyChanged(nameof(ShowSharedCallControls));
++            this.RaisePropertyChanged(nameof(CanEditSharedAnswerCall));
++            this.RaisePropertyChanged(nameof(CanEditSharedDeclineCall));
++            this.RaisePropertyChanged(nameof(SharedAnswerCallLabel));
++            this.RaisePropertyChanged(nameof(SharedDeclineCallLabel));
++            this.RaisePropertyChanged(nameof(SharedAnswerCallDescription));
++            this.RaisePropertyChanged(nameof(SharedDeclineCallDescription));
++            this.RaisePropertyChanged(nameof(SharedAnswerCallEnabled));
++            this.RaisePropertyChanged(nameof(SharedDeclineCallEnabled));
++        }
++        finally
++        {
++            _syncingSharedControls = wasSyncing;
++        }
++    }
++
+     private async void OnPropertyChanged(object? sender, PropertyChangedEventArgs args)
+     {
++        if (args.PropertyName is nameof(IsBudsOnTouchpad) or nameof(IsBudsOnTouchpadBusy) or
++            nameof(BudsOnAnswerOrEnd) or nameof(BudsOnDecline) or nameof(IsBudsOnAnswerOrEndEnabled) or
++            nameof(IsBudsOnDeclineEnabled) or nameof(BudsOnAnswerOrEndDescription) or nameof(BudsOnDeclineDescription) or
++            nameof(IsTouchpadLocked) or nameof(IsDoubleTapGestureForCallsEnabled) or nameof(IsHoldGestureForCallsEnabled))
++            NotifySharedCallControls();
++
++        if (args.PropertyName is nameof(IsBudsOnTouchpad) or nameof(LeftActions) or nameof(RightActions))
++            NotifySharedHoldControls(refreshOptions: true);
++        else if (args.PropertyName is nameof(IsTouchpadLocked) or nameof(IsHoldGestureEnabled) or
++                 nameof(IsBudsOnTouchpadBusy) or nameof(BudsOnLeftHoldVolume) or nameof(BudsOnRightHoldVolume) or
++                 nameof(LeftAction) or nameof(RightAction) or nameof(LeftActionDescription) or nameof(RightActionDescription))
++            NotifySharedHoldControls();
++
++        if (BluetoothImpl.Instance.CurrentModel == Models.BudsOn)
++            return;
++
+         switch (args.PropertyName)
+         {
+             case nameof(IsSingleTapGestureEnabled):

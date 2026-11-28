@@ -1,0 +1,214 @@
+diff --git a/GalaxyBudsClient/Interface/Pages/AdvancedPage.axaml b/GalaxyBudsClient/Interface/Pages/AdvancedPage.axaml
+--- a/GalaxyBudsClient/Interface/Pages/AdvancedPage.axaml
++++ b/GalaxyBudsClient/Interface/Pages/AdvancedPage.axaml
+@@ -101,13 +101,13 @@
+                 </controls:SettingsSwitchItem>
+             </controls:SettingsGroup>
+ 
+-            <StackPanel x:Name="BudsOnPlaybackSettings" Spacing="8" IsVisible="False">
++            <StackPanel x:Name="PlaybackSettings" Spacing="8" IsVisible="False">
+                 <controls:SettingsGroup>
+                     <controls:SettingsSwitchItem x:Name="BudsOnGamingMode"
+                                                  Content="Gaming mode"
+                                                  Symbol="Games" />
+-                    <controls:SettingsSwitchItem x:Name="BudsOnPauseOnRemoval"
+-                                                 Content="Pause when one earbud is removed"
++                    <controls:SettingsSwitchItem x:Name="PauseOnRemoval"
++                                                 Content="{ext:Translate {x:Static i18N:Keys.NcAutoPause}}"
+                                                  Symbol="PauseCircle" />
+                 </controls:SettingsGroup>
+                 <Button x:Name="BudsOnRefreshPlaybackStatus"
+diff --git a/GalaxyBudsClient/Interface/Pages/AdvancedPage.axaml.cs b/GalaxyBudsClient/Interface/Pages/AdvancedPage.axaml.cs
+--- a/GalaxyBudsClient/Interface/Pages/AdvancedPage.axaml.cs
++++ b/GalaxyBudsClient/Interface/Pages/AdvancedPage.axaml.cs
+@@ -5,11 +5,13 @@
+ using Avalonia.Interactivity;
+ using Avalonia.Threading;
+ using FluentAvalonia.UI.Controls;
++using GalaxyBudsClient.Generated.I18N;
+ using GalaxyBudsClient.Interface.Controls;
+ using GalaxyBudsClient.Interface.Services;
+ using GalaxyBudsClient.Interface.ViewModels.Pages;
+ using GalaxyBudsClient.Model.Config;
+ using GalaxyBudsClient.Model.Constants;
++using GalaxyBudsClient.Model.Specifications;
+ using GalaxyBudsClient.Platform;
+ 
+ namespace GalaxyBudsClient.Interface.Pages;
+@@ -26,13 +28,9 @@
+     {
+         InitializeComponent();
+         AddHandler(FASettingsExpanderItem.ClickEvent, OnSettingsItemClicked);
+-        if (!PlatformUtils.IsOSX)
+-            return;
+-
+-        BudsOnGamingMode.PropertyChanged += (_, e) =>
+-            OnBudsOnPlaybackSwitchChanged(e, BudsOnGamingMode, BudsOnDiagnostics.Option.GamingMode);
+-        BudsOnPauseOnRemoval.PropertyChanged += (_, e) =>
+-            OnBudsOnPlaybackSwitchChanged(e, BudsOnPauseOnRemoval, BudsOnDiagnostics.Option.PauseOnRemoval);
++        BudsOnGamingMode.PropertyChanged += async (_, e) =>
++            await OnBudsOnPlaybackSwitchChangedAsync(e, BudsOnGamingMode, BudsOnDiagnostics.Option.GamingMode);
++        PauseOnRemoval.PropertyChanged += async (_, e) => await OnPauseOnRemovalChangedAsync(e);
+         _budsOnPlaybackTimer.Tick += (_, _) => RefreshBudsOnPlaybackControls();
+         AttachedToVisualTree += (_, _) =>
+         {
+@@ -45,27 +43,38 @@
+     private void RefreshBudsOnPlaybackControls()
+     {
+         var bluetooth = BluetoothImpl.Instance;
+-        var device = bluetooth.Device.Current is { Model: Models.BudsOn } budsOn ? budsOn : null;
++        var device = PlatformUtils.IsOSX && bluetooth.Device.Current is { Model: Models.BudsOn } budsOn ? budsOn : null;
++        var supportsAutoPause = bluetooth.DeviceSpec.Supports(Features.AutoPauseResume);
+ 
+-        BudsOnPlaybackSettings.IsVisible = device is not null;
+-        // These desktop-wide actions use legacy wear events, which Buds On does not supply.
+-        DesktopResumePlayback.IsVisible = device is null;
+-        DesktopPausePlayback.IsVisible = device is null;
++        PlaybackSettings.IsVisible = device is not null || supportsAutoPause;
++        BudsOnGamingMode.IsVisible = device is not null;
++        BudsOnRefreshPlaybackStatus.IsVisible = device is not null;
++        if (PlatformUtils.IsOSX)
++        {
++            // These desktop-wide actions use legacy wear events, which Buds On does not supply.
++            DesktopResumePlayback.IsVisible = device is null;
++            DesktopPausePlayback.IsVisible = device is null;
++        }
+         if (!ReferenceEquals(_budsOnPlaybackDevice, device))
+         {
+             _budsOnPlaybackDevice = device;
+             ShowBudsOnPlaybackResult(null);
+         }
+ 
+-        if (device is null)
+-            return;
+-
+-        var connected = CanUseBudsOnPlaybackControls(device);
+         _syncingBudsOnPlayback = true;
+         try
+         {
++            if (device is null)
++            {
++                PauseOnRemoval.IsChecked = ViewModel?.IsAutoPauseEnabled;
++                PauseOnRemoval.Description = Strings.NcAutoPauseDescription;
++                PauseOnRemoval.IsEnabled = supportsAutoPause && bluetooth.IsConnected;
++                return;
++            }
++
++            var connected = CanUseBudsOnPlaybackControls(device);
+             RefreshBudsOnPlaybackSwitch(BudsOnGamingMode, device, BudsOnDiagnostics.Option.GamingMode, connected);
+-            RefreshBudsOnPlaybackSwitch(BudsOnPauseOnRemoval, device, BudsOnDiagnostics.Option.PauseOnRemoval, connected);
++            RefreshBudsOnPlaybackSwitch(PauseOnRemoval, device, BudsOnDiagnostics.Option.PauseOnRemoval, connected);
+             BudsOnRefreshPlaybackStatus.IsEnabled = connected && !_budsOnPlaybackBusy;
+         }
+         finally
+@@ -97,7 +106,25 @@
+         };
+     }
+ 
+-    private async void OnBudsOnPlaybackSwitchChanged(AvaloniaPropertyChangedEventArgs change,
++    private async Task OnPauseOnRemovalChangedAsync(AvaloniaPropertyChangedEventArgs change)
++    {
++        if (_syncingBudsOnPlayback || change.Property != SettingsSwitchItem.IsCheckedProperty)
++            return;
++
++        if (_budsOnPlaybackDevice is not null)
++        {
++            await OnBudsOnPlaybackSwitchChangedAsync(change, PauseOnRemoval, BudsOnDiagnostics.Option.PauseOnRemoval);
++            return;
++        }
++
++        var bluetooth = BluetoothImpl.Instance;
++        if (PauseOnRemoval.IsEnabled && bluetooth.IsConnected &&
++            bluetooth.DeviceSpec.Supports(Features.AutoPauseResume) &&
++            PauseOnRemoval.IsChecked is { } desired && ViewModel is { } viewModel)
++            await viewModel.SetAutoPauseAsync(desired);
++    }
++
++    private async Task OnBudsOnPlaybackSwitchChangedAsync(AvaloniaPropertyChangedEventArgs change,
+         SettingsSwitchItem control, BudsOnDiagnostics.Option option)
+     {
+         if (_syncingBudsOnPlayback || change.Property != SettingsSwitchItem.IsCheckedProperty)
+diff --git a/GalaxyBudsClient/Interface/Pages/NoiseControlPage.axaml b/GalaxyBudsClient/Interface/Pages/NoiseControlPage.axaml
+--- a/GalaxyBudsClient/Interface/Pages/NoiseControlPage.axaml
++++ b/GalaxyBudsClient/Interface/Pages/NoiseControlPage.axaml
+@@ -92,15 +92,7 @@
+                     IsChecked="{Binding IsNcWithOneEarbudAllowed}">
+                 </controls:SettingsSwitchItem>
+ 
+-                <controls:SettingsSwitchItem
+-                    Content="{ext:Translate {x:Static i18N:Keys.NcAutoPause}}"
+-                    Description="{ext:Translate {x:Static i18N:Keys.NcAutoPauseDescription}}"
+-                    Symbol="PauseCircle"
+-                    IsChecked="{Binding IsAutoPauseEnabled}">
+-                    <Interaction.Behaviors>
+-                        <ext:RequiresFeatureBehavior Feature="AutoPauseResume" />
+-                    </Interaction.Behaviors>
+-                </controls:SettingsSwitchItem>
++
+             </controls:SettingsGroup>
+             
+             
+diff --git a/GalaxyBudsClient/Interface/ViewModels/Pages/AdvancedPageViewModel.cs b/GalaxyBudsClient/Interface/ViewModels/Pages/AdvancedPageViewModel.cs
+--- a/GalaxyBudsClient/Interface/ViewModels/Pages/AdvancedPageViewModel.cs
++++ b/GalaxyBudsClient/Interface/ViewModels/Pages/AdvancedPageViewModel.cs
+@@ -1,4 +1,5 @@
+ ﻿using System.ComponentModel;
++using System.Threading.Tasks;
+ using Avalonia.Controls;
+ using FluentIcons.Common;
+ using GalaxyBudsClient.Generated.I18N;
+@@ -27,6 +28,7 @@
+         IsSeamlessConnectionEnabled = e.SeamlessConnectionEnabled;
+         IsCallpathControlEnabled = e.CallPathControl;
+         IsExtraClearCallEnabled = e.ExtraClearCallSound;
++        IsAutoPauseEnabled = e.AutoPauseResume;
+     }
+ 
+     private async void OnPropertyChanged(object? sender, PropertyChangedEventArgs e)
+@@ -57,7 +59,17 @@
+     [Reactive] private bool _isSidetoneEnabled;
+     [Reactive] private bool _isCallpathControlEnabled;
+     [Reactive] private bool _isExtraClearCallEnabled;
++    [Reactive] private bool _isAutoPauseEnabled;
+ 
++    internal async Task SetAutoPauseAsync(bool enabled)
++    {
++        if (IsAutoPauseEnabled == enabled)
++            return;
++
++        IsAutoPauseEnabled = enabled;
++        await BluetoothImpl.Instance.SendRequestAsync(MsgIds.PAUSE_MEDIA_WHEN_ONE_BUD_REMOVED, enabled);
++    }
++
+     public override string TitleKey => Keys.MainpageAdvanced;
+     public override Symbol IconKey => Symbol.WrenchScrewdriver;
+     public override bool ShowsInFooter => false;
+diff --git a/GalaxyBudsClient/Interface/ViewModels/Pages/NoiseControlPageViewModel.cs b/GalaxyBudsClient/Interface/ViewModels/Pages/NoiseControlPageViewModel.cs
+--- a/GalaxyBudsClient/Interface/ViewModels/Pages/NoiseControlPageViewModel.cs
++++ b/GalaxyBudsClient/Interface/ViewModels/Pages/NoiseControlPageViewModel.cs
+@@ -78,7 +78,6 @@
+         IsVoiceDetectEnabled = e.DetectConversations;
+         IsAdaptiveVolumeEnabled = e.AdaptiveVolumeEnabled;
+         IsSirenDetectEnabled = e.SirenDetect;
+-        IsAutoPauseEnabled = e.AutoPauseResume;
+         VoiceDetectTimeout = e.DetectConversationsDuration switch
+         {
+             1 => VoiceDetectTimeouts.Sec10,
+@@ -135,9 +134,6 @@
+             case nameof(IsSirenDetectEnabled):
+                 await BluetoothImpl.Instance.SendRequestAsync(MsgIds.UASC_SIREN_DETECT, IsSirenDetectEnabled);
+                 break;
+-            case nameof(IsAutoPauseEnabled):
+-                await BluetoothImpl.Instance.SendRequestAsync(MsgIds.PAUSE_MEDIA_WHEN_ONE_BUD_REMOVED, IsAutoPauseEnabled);
+-                break;
+             case nameof(VoiceDetectTimeout):
+                 var timeout = VoiceDetectTimeout switch
+                 {
+@@ -252,7 +248,6 @@
+     [Reactive] private bool _isVoiceDetectEnabled;
+     [Reactive] private bool _isAdaptiveVolumeEnabled;
+     [Reactive] private bool _isSirenDetectEnabled;
+-    [Reactive] private bool _isAutoPauseEnabled;
+     [Reactive] private VoiceDetectTimeouts _voiceDetectTimeout;
+ 
+     public override string TitleKey => Keys.MainpageNoise;

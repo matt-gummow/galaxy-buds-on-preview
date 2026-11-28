@@ -72,6 +72,8 @@ jobs:
           git apply "$GITHUB_WORKSPACE/patches/buds-on-battery-display.patch"
           git apply "$GITHUB_WORKSPACE/patches/buds-on-manager-fixes.patch"
           git apply "$GITHUB_WORKSPACE/patches/buds-on-manager-parity.patch"
+          git apply "$GITHUB_WORKSPACE/patches/shared-touchpad.patch"
+          git apply "$GITHUB_WORKSPACE/patches/shared-pause.patch"
           python3 "$GITHUB_WORKSPACE/scripts/stamp_preview.py" "$PWD"
           bash "$GITHUB_WORKSPACE/tests/run-handoff-tests.sh" "$PWD"
 

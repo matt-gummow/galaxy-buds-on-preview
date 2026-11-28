@@ -11,7 +11,7 @@ The preview's failed ordinary Mac reconnection is not a test of the Buds4 Pro mu
 | MDE patch execution | Writes version-only property and checks reply | Additional explicit BudsOn early return |
 | Alternative Samsung channel | General SMEP sender | General sender blocked; separate opt-in handoff transport |
 | Status and settings | Generic model-specific implementation | Dedicated guarded decoder and settings commands |
-| Handoff preview 3 | Uses the upstream multipoint patch | Starts from the verified management connection and holds a separate Samsung control channel |
+| Manager Multipoint | Uses the upstream multipoint patch | Starts from the verified management connection and holds a separate Samsung control channel |
 
 These are application restrictions introduced during protocol validation. They do not prove a hardware restriction. Enabling the Pro flags wholesale would activate command encoders that have not been checked for SM-U600.
 
@@ -20,6 +20,24 @@ These are application restrictions introduced during protocol validation. They d
 Reuse the Manager’s Buds4 Pro controls for features shared with Buds On. Keep their labels, layout, and interactions aligned wherever the behavior matches. Use the selected model’s capabilities to determine which controls appear and which device commands they use.
 
 For Buds On-specific features, place the controls alongside related settings using the Manager’s existing components and interaction patterns.
+
+### Capabilities by model
+
+| Feature | Shared behavior | Manager support for Buds On |
+| --- | --- | --- |
+| Device switching | Samsung lists Auto Switch for both models. | Multipoint uses the shared Settings panel. Automatic setup after a case cycle needs a hardware check. |
+| Battery and EQ | Both expose battery and sound settings. | The shared battery display, menu bar readings, and EQ preset picker use validated Buds On data. Custom EQ curves can be read from supported replies. Editing needs a validated write and readback. |
+| Media and calls | Both support play/pause, track navigation, volume, answer/end, and decline. Buds On uses taps and holds. Buds4 Pro uses pinches and swipes. | Touchpad shares call switches and per-ear hold selectors with model-specific labels and actions. Buds On has a tested grouped media switch. |
+| Per-ear shortcuts | Samsung lists Google or Bixby and shortcuts such as Spotify and Voice Recorder for both models. | Buds On currently exposes the mapped Off and Volume choices. Extra shortcut and assistant mappings need verification. |
+| Find My Earbuds | Samsung Find is listed for both models. | The local ring and stop commands need SM-U600 validation before enabling the shared Find page. |
+| 360 Audio | Samsung lists 360 Audio for both and 360 head tracking for Buds4 Pro. | The basic 360 setting needs SM-U600 readback and write validation. |
+| Wear detection and balance | The user guides document pause on removal, wear-based call routing, and left/right sound balance. | The shared Advanced switch for pause on removal is experimental on SM-U600. Call routing and balance need SM-U600 command and readback validation. |
+| Head gestures and voice control | Nod/shake and voice controls are available on compatible Galaxy devices for both models. | Mac controls need model-specific validation. Head gestures and 360 head tracking are separate capabilities. |
+| Audio formats | Both list Auracast and 24-bit / 96 kHz audio on compatible devices. | Format and broadcast availability follow the host and Bluetooth audio path. |
+
+Buds On lists Audio Leakage Reduction and Auto Volume. Buds4 Pro lists Adaptive ANC, Ambient Sound, Adaptive EQ, and 360 Audio with head tracking. Keep those controls tied to the model and verified behavior.
+
+[Official comparison](https://www.samsung.com/us/mobile-audio/galaxy-buds/compare/) · [Touch controls](https://www.samsung.com/us/support/answer/ANS10001318/) · [Buds On specifications](https://www.samsung.com/sec/support/model/SM-U600NZKAKOO/) · [Buds4 Pro specifications](https://www.samsung.com/sec/support/model/SM-R640NZKAKOO/) · [Buds On user guide](https://downloadcenter.samsung.com/content/UM/202610/20261002151858228/U600_UG_CA_ENG_D2.pdf)
 
 ## Samsung protocol distinctions
 
